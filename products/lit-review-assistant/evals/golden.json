@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "description": "Minimal golden set scaffold for evidence-card extraction. Fill expected fields with human labels as the corpus stabilizes.",
+  "documents": [
+    {
+      "title_contains": "新型混合交通交叉口信号与车辆轨迹协同控制方法",
+      "fields": {
+        "research_question": {
+          "expected_terms": ["混合交通", "信号配时", "车辆轨迹", "协同控制", "交叉口"],
+          "expected_dimension": "dimension_supported",
+          "require_usable": true,
+          "forbidden_terms": ["基金项目", "作者简介", "参考文献"]
+        },
+        "method": {
+          "expected_terms": ["信号", "轨迹", "控制"],
+          "expected_dimension": "dimension_supported",
+          "require_usable": true,
+          "forbidden_terms": ["结果表明", "实验表明"],
+          "forbidden_patterns": ["可以与(?:本文)?提出的控制模块替换"]
+        },
+        "data_or_materials": {
+          "expected_terms": ["仿真", "场景"],
+          "expected_dimension": "dimension_supported",
+          "require_usable": true,
+          "forbidden_terms": ["结果表明", "平均延误"]
+        },
+        "evidence": {
+          "expected_terms": ["实验", "指标", "延误", "通过效率"],
+          "expected_dimension": "dimension_supported",
+          "require_usable": true,
+          "forbidden_terms": ["基金项目"]
+        },
+        "limitations": {
+          "expected_terms": ["挑战", "不能", "难以", "限制", "依赖", "不确定"],
+          "expected_dimension": "dimension_supported",
+          "require_usable": true,
+          "forbidden_terms": ["积极影响", "有助于"],
+          "forbidden_patterns": ["(?:相位\\d+|\\d+和\\d+).{0,40}(?:同时停止|绿灯)", "最小绿灯限制", "ti,?e.{0,60}优先级"]
+        }
+      }
+    },
+    {
+      "title_contains": "网约车",
+      "fields": {
+        "method": {
+          "expected_terms": ["模型", "预测"],
+          "expected_dimension": "dimension_supported",
+          "require_usable": true,
+          "forbidden_terms": ["已有研究", "表现良好"]
+        },
+        "data_or_materials": {
+          "expected_terms": ["2017", "海口", "网约车", "数据"],
+          "expected_dimension": "dimension_supported",
+          "require_usable": true,
+          "forbidden_terms": ["矩阵", "分解", "权重"]
+        },
+        "evidence": {
+          "expected_terms": ["指标", "误差", "预测"],
+          "expected_dimension": "dimension_supported",
+          "forbidden_terms": ["作者简介", "基金项目"]
+        }
+      }
+    },
+    {
+      "title_contains": "域外汉籍",
+      "fields": {
+        "method": {
+          "expected_terms": ["文献计量", "知识图谱"],
+          "expected_dimension": "dimension_supported",
+          "forbidden_terms": ["参考文献"]
+        },
+        "data_or_materials": {
+          "expected_terms": ["中国知网", "期刊", "论文", "809篇文献"],
+          "expected_dimension": "dimension_supported",
+          "require_usable": true,
+          "forbidden_terms": ["变量", "样本数量"]
+        },
+        "limitations": {
+          "expected_terms": ["缺乏", "不足", "局限"],
+          "expected_dimension": "dimension_supported",
+          "forbidden_terms": ["积极影响", "抗风险能力"]
+        }
+      }
+    }
+  ]
+}
