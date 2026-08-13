@@ -1,0 +1,8 @@
+{
+  "name": "cfop-3d-classroom",
+  "private": true,
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "firebase-admin": "^13.6.0"
+  }
+}

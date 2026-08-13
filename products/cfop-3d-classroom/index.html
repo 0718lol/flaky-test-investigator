@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f4f5f1" />
+    <title>CFOP 立体教室</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <section class="auth-screen" id="authScreen" aria-labelledby="authTitle">
+      <div class="auth-grid"></div>
+      <div class="auth-orbit auth-orbit-one"></div>
+      <div class="auth-orbit auth-orbit-two"></div>
+      <div class="auth-panel">
+        <div class="auth-kicker"><span class="signal-dot"></span> CFOP // LEARNING NETWORK</div>
+        <div class="auth-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+        <h1 id="authTitle">进入立体教室</h1>
+        <p class="auth-lead">你的公式记忆与训练记录，将在设备之间保持同步。</p>
+        <form id="authForm" class="auth-form">
+          <label for="authName">学习者名称</label>
+          <input id="authName" name="name" maxlength="24" autocomplete="nickname" placeholder="输入你的名字" required />
+          <button type="submit" class="auth-submit"><span>接入学习档案</span><b>↗</b></button>
+          <p class="auth-error" id="authError" role="alert" hidden></p>
+        </form>
+        <div class="auth-actions"><button type="button" id="guestEntry">游客体验</button><span>名字唯一 · 无密码 · 仅作识别</span></div>
+        <p class="auth-notice">提示：不设置密码意味着知道名字即可进入对应档案，请勿使用敏感信息。</p>
+      </div>
+      <div class="auth-status"><span>SYNC STATUS</span><strong>READY</strong></div>
+    </section>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+          <div><strong>CFOP 立体教室</strong><span>119 个公式 · 15 个十字训练</span></div>
+        </div>
+        <div class="header-actions">
+          <div class="account-chip" id="accountChip"><span class="account-pulse"></span><strong id="accountName">游客</strong><button id="logoutAccount" type="button">退出</button></div>
+          <button class="icon-button" id="resetView" type="button" aria-label="复位视角" data-tooltip="复位视角">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+          </button>
+          <button class="quiet-button" id="resetLesson" type="button">重置案例</button>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <aside class="lesson-panel" aria-label="CFOP 课程阶段">
+          <div class="panel-heading">
+            <span class="eyebrow">学习路径</span>
+            <strong id="pathTitle">起步路径</strong>
+            <span id="pathDescription" class="path-description"></span>
+          </div>
+          <nav id="pathList" class="path-list" aria-label="学习路径"></nav>
+          <div id="pathProgress" class="path-progress" aria-live="polite"></div>
+          <details class="notation-guide" id="notationGuide">
+            <summary><strong>公式图例</strong><span>基础玩法</span></summary>
+            <div class="notation-grid">
+              <div><code>R</code><span>顺时针 90°</span></div>
+              <div><code>R'</code><span>逆时针 90°</span></div>
+              <div><code>R2</code><span>旋转 180°</span></div>
+              <div><code>r</code><span>右侧双层转动</span></div>
+              <div><code>M</code><span>中间层转动</span></div>
+              <div><code>x</code><span>按 R 方向整体转动</span></div>
+              <div><code>y</code><span>按 U 方向整体转动</span></div>
+              <div><code>z</code><span>按 F 方向整体转动</span></div>
+            </div>
+          </details>
+          <details class="review-board" id="reviewBoard">
+            <summary class="review-heading">
+              <strong id="reviewTitle">待复习</strong>
+              <span id="reviewCount">0</span>
+            </summary>
+            <div class="review-groups" id="reviewList"></div>
+          </details>
+          <div class="stage-heading"><span>本层内容</span><span id="stageProgress"></span></div>
+          <nav id="stageList" class="stage-list"></nav>
+          <button class="path-exam-button" id="pathExamButton" type="button" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8M9 2h6v4H9zM6 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1"/><path d="m8 14 2.5 2.5L16 11"/></svg>
+            <span><strong id="pathExamTitle">起步结业测验</strong><small id="pathExamStatus">完成课程后解锁</small></span>
+            <em id="pathExamScore">锁定</em>
+          </button>
+        </aside>
+
+        <section class="cube-stage" aria-label="三维魔方演示">
+          <div id="scene" class="scene"></div>
+          <div class="scene-overlay">
+            <span id="viewLabel">拖动旋转视角 · 滚轮缩放</span>
+            <div class="axis-cue" aria-label="方向：上、前、右">
+              <span class="axis up">U</span><span class="axis front">F</span><span class="axis right">R</span>
+            </div>
+          </div>
+          <div id="turnBadge" class="turn-badge" aria-live="polite"><span>当前转动</span><strong>准备</strong></div>
+        </section>
+
+        <aside class="coach-panel">
+          <div class="mode-switch" role="tablist" aria-label="训练模式">
+            <button class="active" data-mode="learn" type="button" role="tab" aria-selected="true">学习</button>
+            <button data-mode="practice" type="button" role="tab" aria-selected="false">练习</button>
+            <button data-mode="test" type="button" role="tab" aria-selected="false">测试</button>
+          </div>
+          <div class="lesson-copy">
+            <span class="stage-number" id="stageNumber">01</span>
+            <span class="eyebrow" id="stageEnglish">CROSS</span>
+            <h1 id="lessonTitle">底层十字</h1>
+            <p id="lessonGoal"></p>
+          </div>
+          <label class="case-picker" id="casePicker" for="caseSelect">
+            <span>选择案例</span>
+            <select id="caseSelect"></select>
+          </label>
+          <div class="focus-note">
+            <span class="focus-dot"></span>
+            <div><span>观察重点</span><strong id="focusText"></strong></div>
+          </div>
+          <div class="algorithm-block">
+            <div class="algorithm-heading"><span>演示公式</span><span id="stepCount">0 / 0</span></div>
+            <div id="algorithm" class="algorithm" aria-label="公式步骤"></div>
+            <div id="formulaMask" class="formula-mask">
+              <strong>公式已隐藏</strong><span>先回忆动作，再查看答案</span>
+            </div>
+          </div>
+          <button class="formula-toggle" id="formulaToggle" type="button" hidden>查看答案</button>
+          <div class="test-panel" id="testPanel" hidden>
+            <div class="exam-session" id="pathExamSession" hidden>
+              <div><span id="pathExamSessionTitle">起步结业测验</span><strong id="pathExamQuestion">1 / 10</strong></div>
+              <i><b id="pathExamBar"></b></i>
+            </div>
+            <div class="test-time"><span id="testTimeLabel">测试计时</span><strong id="testTimer">00:00.0</strong></div>
+            <button class="test-action" id="testAction" type="button">开始测试</button>
+            <div class="test-result-actions" id="testResultActions" hidden>
+              <button class="test-success" id="testSuccess" type="button">成功</button>
+              <button class="test-review" id="testReview" type="button">需要复习</button>
+            </div>
+            <p class="test-feedback" id="testFeedback" hidden></p>
+          </div>
+          <div class="transport" id="transport">
+            <button class="icon-button transport-button" id="previous" type="button" aria-label="上一步">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+            </button>
+            <button class="play-button" id="play" type="button">
+              <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7Z"/></svg>
+              <svg class="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5v14M15 5v14"/></svg>
+              <span>播放演示</span>
+            </button>
+            <button class="icon-button transport-button" id="next" type="button" aria-label="下一步">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </button>
+          </div>
+          <button class="mastery-button" id="markLearned" type="button" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+            <span>标记已掌握</span>
+          </button>
+          <label class="speed-control" id="speedControl" for="speed">
+            <span>转动速度</span><strong id="speedValue">1.0×</strong>
+            <input id="speed" type="range" min="0.5" max="2" step="0.5" value="1" />
+          </label>
+          <div class="keyboard-note" id="keyboardNote"><kbd>←</kbd><kbd>→</kbd><span>逐步学习</span><kbd>空格</kbd><span>播放 / 暂停</span></div>
+        </aside>
+      </section>
+    </main>
+    <script type="importmap">
+      {"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.166.1/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.166.1/examples/jsm/"}}
+    </script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
