@@ -74,6 +74,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .view-header h1 { margin: 0; font-size: 30px; line-height: 1.15; font-weight: 520; }
 .view-header p { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .eyebrow { margin-bottom: 8px; color: var(--faint); font-size: 9px; text-transform: uppercase; }
+.view-back { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: 10px; }
+.view-back span { color: var(--mint); font-size: 13px; }
+.view-back:hover { color: var(--mint); }
 .header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 
 .button { min-height: 36px; padding: 0 13px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface); color: var(--ink); font-size: 11px; transition: border-color .18s ease, color .18s ease, background .18s ease; }
@@ -196,9 +199,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .side-head { min-height: 46px; display: flex; align-items: center; justify-content: space-between; padding: 0 15px; border-bottom: 1px solid var(--line); }
 .side-head h2 { margin: 0; font-size: 11px; font-weight: 550; }
 .side-body { padding: 14px 15px; }
-.current-person { display: flex; align-items: center; gap: 10px; }
+.current-person { width: 100%; display: flex; align-items: center; gap: 10px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; }
+.current-person-copy { min-width: 0; }
 .current-person strong { display: block; font-size: 12px; }
 .current-person small { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; }
+.current-person-open { margin-left: auto; color: var(--muted); font-size: 9px; white-space: nowrap; }
+.current-person:hover .current-person-open { color: var(--mint); }
 .draft-state { padding: 11px; border-left: 2px solid var(--coral); background: #28201d; color: #dfc7be; font-size: 10px; line-height: 1.55; }
 .side-version-list { display: grid; gap: 5px; }
 .side-version { width: 100%; min-height: 48px; padding: 8px 9px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: inherit; text-align: left; }

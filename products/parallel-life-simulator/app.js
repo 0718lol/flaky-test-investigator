@@ -362,8 +362,11 @@ function renderRailPerson(person) {
   target.innerHTML = `<button type="button" data-nav="profile"><span class="mini-avatar">${esc(person.name.slice(0, 1))}</span><span><strong>${esc(person.name)}</strong><small>${esc(person.city)} · ${esc(person.job)}</small></span></button>`;
 }
 
-function viewHeader(kicker, title, subtitle, actions = '') {
-  return `<header class="view-header"><div><div class="eyebrow">${esc(kicker)}</div><h1>${esc(title)}</h1><p>${esc(subtitle)}</p></div><div class="header-actions">${actions}</div></header>`;
+function viewHeader(kicker, title, subtitle, actions = '', back = null) {
+  const context = back
+    ? `<button class="view-back" type="button" data-nav="${esc(back.view)}"><span aria-hidden="true">←</span>${esc(back.label)}</button>`
+    : `<div class="eyebrow">${esc(kicker)}</div>`;
+  return `<header class="view-header"><div>${context}<h1>${esc(title)}</h1><p>${esc(subtitle)}</p></div><div class="header-actions">${actions}</div></header>`;
 }
 
 function renderPeople() {
@@ -409,7 +412,7 @@ function renderProfile(person) {
   ];
   const actions = `<button class="button" type="button" data-action="edit-person">编辑画像</button><button class="button primary" type="button" data-nav="simulate">进入推演</button>`;
   return `<section class="view profile-view">
-    ${viewHeader('PERSON PROFILE', `${person.name}的人物档案`, '基础画像影响之后的新推演，不改写已经保存的版本', actions)}
+    ${viewHeader('PERSON PROFILE', `${person.name}的人物档案`, '基础画像影响之后的新推演，不改写已经保存的版本', actions, {view: 'people', label: '返回人物空间'})}
     <div class="profile-layout">
       <aside class="portrait-panel">
         <div class="eyebrow">${person.kind === 'self' ? 'SELF / EXPLORATION' : 'CHARACTER / OBSERVER'}</div>
@@ -451,7 +454,7 @@ function renderSimulator(person) {
   const draft = ui.draft?.personId === person.id ? ui.draft : null;
   const actions = `${draft ? '<button class="button danger" type="button" data-action="discard-draft">放弃改写</button>' : ''}<button class="button" type="button" data-action="simulation-settings">推演设置</button><button class="button" type="button" data-action="extend-five">继续五年</button><button class="button primary" type="button" data-action="save-version" ${draft ? '' : 'disabled'}>保存新版本</button>`;
   return `<section class="view simulate-view">
-    ${viewHeader('LIFE SIMULATION', `${person.name}的时间推演`, `${version?.name || '当前版本'}${draft ? ' · 未保存改写' : ''}`, actions)}
+    ${viewHeader('LIFE SIMULATION', `${person.name}的时间推演`, `${version?.name || '当前版本'}${draft ? ' · 未保存改写' : ''}`, actions, {view: 'profile', label: `返回${person.name}的人物档案`})}
     <div class="sim-layout">
       <section class="sim-main">
         <div class="sim-toolbar"><h2>五年窗口 <span>完整轨迹 ${nodes[0]?.year || '--'}—${nodes.at(-1)?.year || '--'}</span></h2><div class="window-controls"><button class="icon-button" type="button" data-action="window-prev" aria-label="前五年">‹</button><span>${visible[0]?.year || '--'}—${visible.at(-1)?.year || '--'}</span><button class="icon-button" type="button" data-action="window-next" aria-label="后五年">›</button></div></div>
@@ -460,7 +463,7 @@ function renderSimulator(person) {
         ${renderSelectedNode(selected, selectedIndex)}
       </section>
       <aside class="sim-side">
-        <section><div class="side-head"><h2>当前人物</h2><button class="text-action" type="button" data-nav="profile">档案</button></div><div class="side-body"><div class="current-person"><span class="mini-avatar">${esc(person.name.slice(0, 1))}</span><div><strong>${esc(person.name)}</strong><small>${esc(person.city)} · ${esc(person.job)}</small></div></div></div></section>
+        <section><div class="side-head"><h2>当前人物</h2></div><div class="side-body"><button class="current-person" type="button" data-nav="profile"><span class="mini-avatar">${esc(person.name.slice(0, 1))}</span><span class="current-person-copy"><strong>${esc(person.name)}</strong><small>${esc(person.city)} · ${esc(person.job)}</small></span><span class="current-person-open">打开档案 <span aria-hidden="true">›</span></span></button></div></section>
         ${draft ? `<section><div class="side-head"><h2>未保存改写</h2></div><div class="side-body"><div class="draft-state">从 ${nodes[draft.startIndex]?.year || '--'} 年开始，${draft.changedCount} 个节点已经重新推演。</div></div></section>` : ''}
         <section><div class="side-head"><h2>已保存版本</h2><button class="text-action" type="button" data-nav="compare">对照</button></div><div class="side-body"><div class="side-version-list">${person.versions.map((item) => `<button class="side-version ${item.id === person.activeVersionId ? 'active' : ''}" type="button" data-action="open-version" data-version="${esc(item.id)}"><strong>${esc(item.name)}</strong><small>${item.nodes[0]?.year || '--'}—${item.nodes.at(-1)?.year || '--'} · ${formatDate(item.createdAt)}</small></button>`).join('')}</div></div></section>
       </aside>
