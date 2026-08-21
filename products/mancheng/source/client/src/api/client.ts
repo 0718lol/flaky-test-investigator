@@ -390,6 +390,10 @@ export interface AiItineraryInput {
   endDate: string
   travelerCount: number
   budget?: number
+  arrivalTime?: string
+  departureTime?: string
+  baseLocation?: string
+  transportPreference: 'mixed' | 'public_transit' | 'walking' | 'taxi' | 'self_drive'
   interests: string[]
   pace: 'relaxed' | 'balanced' | 'packed'
   specialRequirements: string
@@ -413,8 +417,11 @@ export interface AiItinerary {
   notes: string[]
 }
 
+export type AiItineraryDay = AiItinerary['days'][number]
+
 export const aiItineraryApi = {
   generate: (input: AiItineraryInput) => apiClient.post<{ itinerary: AiItinerary }>('/ai/itinerary/generate', input, { timeout: 135_000 }).then(r => r.data),
+  regenerateDay: (input: AiItineraryInput, itinerary: AiItinerary, targetDate: string) => apiClient.post<{ day: AiItineraryDay }>('/ai/itinerary/regenerate-day', { input, itinerary, targetDate }, { timeout: 135_000 }).then(r => r.data),
   create: (input: AiItineraryInput, itinerary: AiItinerary) => apiClient.post<{ trip: import('../types').Trip; days: unknown }>('/ai/itinerary/create', { input, itinerary }, { timeout: 180_000 }).then(r => r.data),
 }
 

@@ -1,0 +1,4 @@
+name = "漫程"
+start = "sh start.sh"
+health = "/api/health"
+# Runtime and restarts are managed by the ASteam product daemon.

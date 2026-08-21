@@ -10,7 +10,14 @@ import { resolveLlmConfig } from '../llm-parse/llm-config.resolver';
 import { safeFetchLlm } from '../../utils/ssrfGuard';
 import type { User } from '../../types';
 
-const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD dates');
+const dateSchema = z.string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD dates')
+  .refine(value => {
+    const [year, month, day] = value.split('-').map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
+  }, 'Use a valid calendar date');
+const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use HH:mm times');
 
 export const itineraryInputSchema = z.object({
   destination: z.string().trim().min(1).max(160),
@@ -18,9 +25,20 @@ export const itineraryInputSchema = z.object({
   endDate: dateSchema,
   travelerCount: z.number().int().min(1).max(50),
   budget: z.number().finite().nonnegative().max(100_000_000).optional(),
+  arrivalTime: timeSchema.optional(),
+  departureTime: timeSchema.optional(),
+  baseLocation: z.string().trim().min(1).max(300).optional(),
+  transportPreference: z.enum(['mixed', 'public_transit', 'walking', 'taxi', 'self_drive']).default('mixed'),
   interests: z.array(z.string().trim().min(1).max(40)).max(8).default([]),
   pace: z.enum(['relaxed', 'balanced', 'packed']).default('balanced'),
   specialRequirements: z.string().trim().max(1000).default(''),
+}).superRefine((input, context) => {
+  if (input.endDate < input.startDate) {
+    context.addIssue({ code: 'custom', message: 'End date must not be before start date', path: ['endDate'] });
+  }
+  if (input.startDate === input.endDate && input.arrivalTime && input.departureTime && input.departureTime <= input.arrivalTime) {
+    context.addIssue({ code: 'custom', message: 'Departure must be after arrival for a day trip', path: ['departureTime'] });
+  }
 });
 
 const itineraryItemSchema = z.object({
@@ -50,6 +68,12 @@ export const generatedItinerarySchema = z.object({
 
 export type ItineraryInput = z.infer<typeof itineraryInputSchema>;
 export type GeneratedItinerary = z.infer<typeof generatedItinerarySchema>;
+
+const regenerateDayInputSchema = z.object({
+  input: itineraryInputSchema,
+  itinerary: generatedItinerarySchema,
+  targetDate: dateSchema,
+});
 
 const OPENAI_TIMEOUT_MS = 120_000;
 const MAX_ITEMS_TO_GEOCODE = 80;
@@ -96,33 +120,132 @@ function outputSchemaForPrompt(): string {
         lng: 'number or null; only include when known, never invent coordinates',
         startTime: 'HH:mm or null',
         durationMinutes: 'integer',
-        estimatedCost: 'number or omit',
+        estimatedCost: 'number in CNY for all travelers, or omit when uncertain',
       }],
     }],
     notes: ['string'],
   }, null, 2);
 }
 
-function buildPrompt(input: ItineraryInput): { system: string; user: string } {
-  const system = [
-    '你是一个可靠的旅行规划助手。只输出合法 JSON，不要 Markdown，不要解释，不要输出 JSON 之外的内容。',
-    '为普通游客生成可执行但不过度拥挤的旅行计划。每天安排 2 到 5 个地点，地点顺序应尽量合理。',
-    '不要编造营业时间、票价、交通时长或坐标；不确定时使用空值，并在 notes 中提醒用户出发前确认。',
-    '必须为输入日期范围内的每一天输出一个 days 项，日期必须保持 YYYY-MM-DD。',
-    '输出结构必须严格遵守以下形状：',
-    outputSchemaForPrompt(),
-  ].join('\n');
-  const user = JSON.stringify({
+function dayOutputSchemaForPrompt(): string {
+  return JSON.stringify({
+    date: 'YYYY-MM-DD',
+    title: 'string',
+    notes: 'string',
+    items: [{
+      name: 'string',
+      description: 'string',
+      address: 'string or null',
+      lat: 'number or null; only include when known, never invent coordinates',
+      lng: 'number or null; only include when known, never invent coordinates',
+      startTime: 'HH:mm or null',
+      durationMinutes: 'integer',
+      estimatedCost: 'number in CNY for all travelers, or omit when uncertain',
+    }],
+  }, null, 2);
+}
+
+function planningRules(): string[] {
+  return [
+    '你的任务不是罗列热门景点，而是为普通游客生成路线合理、强度适中、可以实际执行的旅行计划。',
+    '只安排真实、名称明确、通常可在地图中搜索到的地点。不要编造景点、餐厅、地址、票价、营业时间、交通时间或经纬度。',
+    '无法确认地址或经纬度时使用 null，不要猜测。',
+    '同一天的地点应尽量位于相同或相邻区域，并按合理游览顺序排列，避免反复折返和跨城跳跃。',
+    '不同日期不要重复安排同一个地点，除非用户在补充要求中明确提出。',
+    'pace 为 relaxed 时通常每天 2 至 3 个地点，balanced 时 3 至 4 个，packed 时 4 至 5 个。',
+    '第一天和最后一天默认更轻松。用户未提供 arrivalTime 或 departureTime 时，不要假定可以使用完整一天，并在 notes 中提醒调整。',
+    'arrivalTime 是抵达目的地交通枢纽的时间，第一天的活动必须在预留前往住宿地、放置行李等合理缓冲后开始。',
+    'departureTime 是离开目的地交通枢纽的时间，最后一天的活动必须提前结束，为取行李和前往机场或车站预留合理时间。',
+    '提供 baseLocation 时，每天优先从其附近开始并在合理情况下回到附近；不得为了回到住宿地制造明显绕路。',
+    'transportPreference 必须实际影响选点距离、换乘次数和每天密度；步行为主时尤其要缩小活动范围，自驾时要考虑停车和道路可达性。',
+    'startTime 是建议到达时间，不是营业时间。时间安排必须为用餐、休息和移动留出合理余量。',
+    'durationMinutes 应符合正常游览习惯，不得为了塞入更多地点而刻意缩短。',
+    'budget 是全部出行人员在目的地游玩期间的总预算，单位人民币，不含往返大交通和住宿。没有预算时按大众消费水平规划。',
+    'estimatedCost 是该项目全部人员的预计支出，单位人民币。无法可靠估计时省略，不要编造精确价格。',
+    '兴趣偏好应影响地点选择，同时保留目的地具有代表性的体验。',
+    'specialRequirements 优先级最高。涉及儿童、老人、无障碍、饮食或体力限制时，降低强度并避开明显不合适的活动。',
+    '餐厅只有在名称明确且较有把握真实存在时才能作为地点；否则只在当天 notes 中建议用餐区域或餐饮类型。',
+    'description 应简洁说明推荐理由、适合体验的内容及与前后地点的衔接，不要堆砌宣传文案。',
+    '开放时间、预约、门票、天气或季节信息不确定时，在 notes 中提醒出发前确认。',
+    '条件无法全部满足时优先保证可执行性，并在 notes 中说明取舍，不要强行安排。',
+  ];
+}
+
+function promptInput(input: ItineraryInput): Record<string, unknown> {
+  const interestDefinitions: Record<string, string> = {
+    food: '当地美食与餐饮体验',
+    culture: '历史文化与人文景观',
+    nature: '自然风光',
+    shopping: '购物',
+    family: '亲子活动',
+    art: '艺术与展览',
+    nightlife: '夜生活',
+    photo: '适合拍照的地点',
+    outdoor: '户外活动',
+  };
+  return {
     destination: input.destination,
     startDate: input.startDate,
     endDate: input.endDate,
     travelerCount: input.travelerCount,
     budget: input.budget ?? null,
-    interests: input.interests,
+    budgetDefinition: '全部人员的当地游玩总预算，人民币，不含往返交通和住宿',
+    arrivalTime: input.arrivalTime ?? null,
+    arrivalTimeDefinition: '第一天抵达目的地机场或车站的当地时间',
+    departureTime: input.departureTime ?? null,
+    departureTimeDefinition: '最后一天从目的地机场或车站离开的当地时间',
+    baseLocation: input.baseLocation ?? null,
+    baseLocationDefinition: '住宿位置或每天主要出发和返回的位置',
+    transportPreference: input.transportPreference,
+    transportPreferenceDefinition: {
+      mixed: '根据路线灵活混合步行、公共交通和打车',
+      public_transit: '优先公共交通，减少打车',
+      walking: '以步行为主，地点需要紧凑集中',
+      taxi: '优先打车，减少换乘和长距离步行',
+      self_drive: '自驾，需要考虑停车和道路可达性',
+    }[input.transportPreference],
+    interests: input.interests.map(interest => interestDefinitions[interest] ?? interest),
     pace: input.pace,
     specialRequirements: input.specialRequirements || null,
-  }, null, 2);
+  };
+}
+
+export function buildPrompt(input: ItineraryInput): { system: string; user: string } {
+  const system = [
+    '你是“漫程”的可靠旅行行程规划助手。',
+    '只输出一个合法 JSON 对象，不要 Markdown、代码块、解释、前言或 JSON 之外的内容。',
+    ...planningRules(),
+    '必须为输入日期范围内的每一天输出一个 days 项，日期必须保持 YYYY-MM-DD。',
+    '行程标题应简洁，summary 用 2 至 4 句话概括整体风格、重点区域和节奏。',
+    '输出结构必须严格遵守以下形状：',
+    outputSchemaForPrompt(),
+  ].join('\n');
+  const user = JSON.stringify(promptInput(input), null, 2);
   return { system, user: `请根据以下旅行条件生成计划：\n${user}` };
+}
+
+export function buildDayPrompt(
+  input: ItineraryInput,
+  itinerary: GeneratedItinerary,
+  targetDate: string,
+): { system: string; user: string } {
+  const system = [
+    '你是“漫程”的可靠旅行行程规划助手。',
+    '只输出一个合法 JSON 对象，不要 Markdown、代码块、解释、前言或 JSON 之外的内容。',
+    ...planningRules(),
+    `只重新规划 ${targetDate} 这一天，date 必须严格等于 ${targetDate}。`,
+    'existingDays 中的地点已经安排在其他日期，新计划不得与它们重复。',
+    '输出结构必须严格遵守以下形状：',
+    dayOutputSchemaForPrompt(),
+  ].join('\n');
+  const user = JSON.stringify({
+    tripConditions: promptInput(input),
+    targetDate,
+    existingDays: itinerary.days
+      .filter(day => day.date !== targetDate)
+      .map(day => ({ date: day.date, places: day.items.map(item => item.name) })),
+  }, null, 2);
+  return { system, user: `请重新生成指定日期的完整安排：\n${user}` };
 }
 
 async function completeJson(config: NonNullable<ReturnType<typeof resolveLlmConfig>>, prompt: { system: string; user: string }): Promise<unknown> {
@@ -208,6 +331,15 @@ function normalizeItinerary(input: ItineraryInput, raw: unknown): GeneratedItine
   };
 }
 
+function normalizeGeneratedDay(raw: unknown, targetDate: string): GeneratedItinerary['days'][number] {
+  const wrapped = raw && typeof raw === 'object' && 'day' in raw
+    ? (raw as { day?: unknown }).day
+    : raw;
+  const parsed = generatedDaySchema.safeParse(wrapped);
+  if (!parsed.success) throw new HttpException({ error: 'AI 返回的当天行程格式无法识别，请重试' }, 502);
+  return { ...parsed.data, date: targetDate };
+}
+
 async function enrichItem(userId: number, destination: string, item: GeneratedItinerary['days'][number]['items'][number]) {
   if (item.lat != null && item.lng != null) return item;
   try {
@@ -248,6 +380,20 @@ export class AiItineraryService {
     assertGenerationAllowed(userId);
     const raw = await completeJson(config, buildPrompt(inputResult.data));
     return normalizeItinerary(inputResult.data, raw);
+  }
+
+  async regenerateDay(userId: number, body: unknown): Promise<GeneratedItinerary['days'][number]> {
+    const payloadResult = regenerateDayInputSchema.safeParse(body);
+    if (!payloadResult.success) throw new HttpException({ error: '当天行程条件无效，请重新生成' }, 400);
+    const { input, targetDate } = payloadResult.data;
+    const expectedDates = dateRange(input.startDate, input.endDate);
+    if (!expectedDates.includes(targetDate)) throw new HttpException({ error: '要重新生成的日期不在旅行范围内' }, 400);
+    const itinerary = normalizeItinerary(input, payloadResult.data.itinerary);
+    const config = resolveLlmConfig(userId);
+    if (!config) throw new HttpException({ error: 'AI 尚未配置，请管理员先启用 AI Parsing 并配置云端模型' }, 503);
+    assertGenerationAllowed(userId);
+    const raw = await completeJson(config, buildDayPrompt(input, itinerary, targetDate));
+    return normalizeGeneratedDay(raw, targetDate);
   }
 
   async create(user: User, body: unknown): Promise<{ trip: unknown; days: unknown }> {

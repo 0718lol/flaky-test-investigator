@@ -16,6 +16,12 @@ export class AiItineraryController {
     return this.itinerary.generate(user.id, body).then(itinerary => ({ itinerary }));
   }
 
+  @Post('regenerate-day')
+  @HttpCode(200)
+  regenerateDay(@CurrentUser() user: User, @Body() body: unknown) {
+    return this.itinerary.regenerateDay(user.id, body).then(day => ({ day }));
+  }
+
   @Post('create')
   @HttpCode(201)
   create(@CurrentUser() user: User, @Body() body: unknown) {
