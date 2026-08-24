@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f6f7f9" />
+    <title>Relay</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css?v=20260824-3" />
+  </head>
+  <body>
+    <div class="app" id="app">
+      <aside class="sidebar" aria-label="主导航">
+        <button class="product-glyph" type="button" title="Relay 首页">
+          <span class="relay-mark" aria-hidden="true"><i></i><i></i></span>
+          <strong>Relay</strong>
+        </button>
+
+        <button class="workspace-switcher" id="workspaceSwitcher" type="button">
+          <span class="workspace-logo">AC</span>
+          <span><strong>Acme Cloud</strong><small>客户运营团队</small></span>
+          <i data-lucide="chevrons-up-down"></i>
+        </button>
+        <div class="sidebar-menu workspace-menu" id="workspaceMenu" hidden>
+          <span>工作区</span>
+          <button type="button" data-workspace="acme"><b>AC</b><span><strong>Acme Cloud</strong><small>当前工作区</small></span><i data-lucide="check"></i></button>
+          <button type="button" data-workspace="sandbox"><b>SB</b><span><strong>演练空间</strong><small>4 个模拟事件</small></span></button>
+        </div>
+
+        <nav class="sidebar-nav">
+          <span class="nav-label">工作区</span>
+          <button class="rail-link active" type="button" title="升级事件" data-view="escalations"><i data-lucide="inbox"></i><span>升级事件</span><b id="sidebarCount">3</b></button>
+          <button class="rail-link" type="button" title="客户列表" data-view="customers"><i data-lucide="building-2"></i><span>客户</span></button>
+          <button class="rail-link" type="button" title="值班安排" data-view="oncall"><i data-lucide="calendar-clock"></i><span>值班安排</span></button>
+          <button class="rail-link" type="button" title="处置手册" data-view="playbooks"><i data-lucide="library"></i><span>处置手册</span></button>
+
+          <span class="nav-label secondary-label">洞察</span>
+          <button class="rail-link" type="button" title="运营报告" data-view="reports"><i data-lucide="chart-no-axes-combined"></i><span>运营报告</span></button>
+          <button class="rail-link" type="button" title="复盘记录" data-view="retros"><i data-lucide="history"></i><span>复盘记录</span></button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="service-health"><span></span><div><strong>服务正常</strong><small>最近检查 1 分钟前</small></div></div>
+          <button class="profile-button" id="profileButton" type="button"><span>岚</span><div><strong>林岚</strong><small>升级负责人</small></div><i data-lucide="more-horizontal"></i></button>
+          <div class="sidebar-menu profile-menu" id="profileMenu" hidden><span>个人菜单</span><button type="button" data-profile-action="availability"><i data-lucide="circle-user-round"></i><span><strong>值班状态</strong><small>当前在线</small></span></button><button type="button" data-profile-action="preferences"><i data-lucide="settings"></i><span><strong>通知偏好</strong><small>3 个渠道已开启</small></span></button></div>
+        </div>
+      </aside>
+
+      <div class="main-shell">
+        <header class="global-header">
+          <span class="mobile-brand">Relay</span>
+          <label class="global-search" for="caseSearch">
+            <i data-lucide="search"></i>
+            <input id="caseSearch" type="search" placeholder="搜索客户、事件或负责人" autocomplete="off" />
+            <kbd>/</kbd>
+          </label>
+          <div class="header-actions">
+            <div class="notification-wrap"><button class="header-icon" id="notificationButton" type="button" title="通知" aria-label="通知"><i data-lucide="bell"></i><span></span></button><div class="notification-menu" id="notificationMenu" hidden><div><strong>通知</strong><button type="button" data-notification-action="read">全部已读</button></div><button type="button" data-case-id="ESC-1842"><b class="notice-dot"></b><span><strong>Apex Health 距承诺还有 42 分钟</strong><small>2 分钟前</small></span></button><button type="button" data-case-id="ESC-1837"><b></b><span><strong>安全答复包已完成内部复核</strong><small>18 分钟前</small></span></button></div></div>
+            <button class="button solid" id="newCaseButton" type="button"><i data-lucide="plus"></i>新建升级</button>
+          </div>
+        </header>
+
+        <section class="queue-pane" aria-label="升级事件总览">
+          <div class="overview-head">
+            <div>
+              <span class="page-eyebrow">Escalations</span>
+              <h1>升级事件</h1>
+              <p>高价值客户的风险、承诺与处置进展。</p>
+            </div>
+            <div class="overview-actions">
+              <button class="button quiet" id="queueRefresh" type="button"><i data-lucide="refresh-cw"></i>刷新</button>
+            </div>
+          </div>
+
+          <div class="overview-stats">
+            <article><span>处理中</span><strong id="activeCount">0</strong><small>较昨日 <b class="up">+2</b></small></article>
+            <article><span>临近承诺</span><strong>2</strong><small>未来 60 分钟</small></article>
+            <article><span>首次响应</span><strong>18<span>m</span></strong><small>目标 30 分钟</small></article>
+            <article><span>SLA 达标</span><strong>94<span>%</span></strong><small>本月 76 起事件</small></article>
+          </div>
+
+          <div class="list-toolbar">
+            <div class="queue-filters" id="queueFilters" role="tablist" aria-label="队列筛选">
+              <button type="button" data-filter="all" aria-pressed="true">全部</button>
+              <button type="button" data-filter="urgent" aria-pressed="false">紧急</button>
+              <button type="button" data-filter="waiting" aria-pressed="false">待客户</button>
+            </div>
+            <span class="list-count">按更新时间排序</span>
+          </div>
+
+          <div class="case-table-head" aria-hidden="true">
+            <span>事件</span><span>商业风险</span><span>负责人</span><span>状态</span><span>承诺</span>
+          </div>
+          <div class="case-list" id="caseList"></div>
+
+          <footer class="overview-foot">
+            <span><i data-lucide="circle-check"></i><b id="todayResolved">7</b> 起事件今日关闭</span>
+            <span>数据更新于刚刚</span>
+          </footer>
+        </section>
+
+        <section class="module-pane" id="modulePane" aria-live="polite"></section>
+
+        <main class="case-workspace" aria-live="polite">
+          <header class="case-topbar">
+            <button class="back-button" id="caseBackButton" type="button"><i data-lucide="arrow-left"></i><span>返回事件列表</span></button>
+            <div class="topbar-actions">
+              <div class="compact-sla"><span id="slaState">剩余</span><strong id="slaClock">00:00:00</strong></div>
+              <button class="button quiet" id="contextToggle" type="button"><i data-lucide="panel-right"></i>案件信息</button>
+              <button class="button quiet" id="exportCase" type="button"><i data-lucide="download"></i>导出</button>
+              <button class="button solid" id="sendUpdateButton" type="button"><i data-lucide="send"></i>客户更新</button>
+            </div>
+          </header>
+
+          <div class="case-page">
+            <section class="case-hero">
+              <div class="case-title-wrap">
+                <div class="case-flags">
+                  <span class="case-number" id="caseId">ESC-000</span>
+                  <span class="priority-chip" id="priorityChip">P1</span>
+                  <span class="health-chip" id="healthChip">升级中</span>
+                  <span id="caseCustomer">Apex Health</span>
+                </div>
+                <h2 id="caseTitle">加载中</h2>
+                <p id="caseSubtitle"></p>
+              </div>
+              <label class="status-field" for="statusSelect"><span>案件状态</span><select id="statusSelect"><option value="investigating">调查中</option><option value="mitigating">处置中</option><option value="waiting">待客户</option><option value="monitoring">观察中</option><option value="resolved">已解决</option></select></label>
+            </section>
+
+            <section class="fact-bar" aria-label="案件摘要">
+              <div class="risk-block"><span>商业风险</span><strong id="riskValue">--</strong></div>
+              <div><span>负责人</span><strong id="ownerValue">--</strong></div>
+              <div><span>影响范围</span><strong id="impactValue">--</strong></div>
+              <div><span>下次更新</span><strong id="nextUpdateValue">--</strong></div>
+              <div class="sla-line"><span id="slaProgress"></span></div>
+              <span class="visually-hidden" id="slaLabel">下次更新截止时间</span>
+            </section>
+
+            <nav class="case-tabs" id="caseTabs" aria-label="案件视图">
+              <button type="button" data-tab="brief" aria-selected="true">作战简报</button>
+              <button type="button" data-tab="sources" aria-selected="false">来源 <span id="sourceTabCount">0</span></button>
+              <button type="button" data-tab="timeline" aria-selected="false">时间线</button>
+            </nav>
+            <div class="tab-panel" id="tabPanel"></div>
+          </div>
+
+          <aside class="context-drawer" id="contextDrawer" aria-label="案件信息" aria-hidden="true" inert>
+            <div class="drawer-head"><div><span>Case context</span><h2>案件信息</h2></div><button class="header-icon" id="closeContext" type="button" aria-label="关闭案件信息"><i data-lucide="x"></i></button></div>
+            <section class="drawer-section"><div class="rail-head"><h3>客户承诺</h3><span>下一次更新</span></div><div class="drawer-deadline"><strong id="drawerClock">--:--</strong><span>保持同一事实口径</span></div></section>
+            <section class="drawer-section"><div class="rail-head"><h3>协作成员</h3><button class="text-button" id="addStakeholder" type="button">添加</button></div><div class="people-list" id="peopleList"></div></section>
+            <section class="drawer-section"><div class="rail-head"><h3>分析判断依据</h3><span id="evidenceCount">0 条</span></div><div class="evidence-list" id="evidenceList"></div></section>
+          </aside>
+          <div class="drawer-backdrop" id="drawerBackdrop"></div>
+        </main>
+      </div>
+    </div>
+
+    <dialog id="newCaseDialog" class="dialog">
+      <form id="newCaseForm" method="dialog">
+        <div class="dialog-head"><div><span class="dialog-kicker">New escalation</span><h2>新建升级事件</h2><p>粘贴现场信息，先建立负责人和客户更新时间。</p></div><button class="header-icon" value="cancel" formmethod="dialog" type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="form-grid"><label><span>客户名称</span><input name="customer" required placeholder="例如：Northstar Bio" /></label><label><span>商业风险</span><input name="risk" required placeholder="例如：¥860k 续费" /></label><label class="full-field"><span>发生了什么</span><textarea name="notes" required rows="7" placeholder="粘贴工单、群聊、电话纪要或日志"></textarea></label><label><span>优先级</span><select name="priority"><option>P1</option><option selected>P2</option><option>P3</option></select></label><label><span>负责人</span><select name="owner"><option>林岚</option><option>周启</option><option>唐茜</option></select></label></div>
+        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" type="submit">取消</button><button class="button solid" type="submit">创建并分析</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="sourceDialog" class="dialog compact-dialog">
+      <form id="sourceForm" method="dialog">
+        <div class="dialog-head"><div><span class="dialog-kicker">New source</span><h2>添加现场来源</h2><p>保留原始内容，重新校验当前判断。</p></div><button class="header-icon" value="cancel" formmethod="dialog" type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="form-grid"><label><span>来源</span><select name="type"><option>客户邮件</option><option>工单</option><option>Slack</option><option>日志</option><option>会议记录</option></select></label><label><span>时间</span><input name="time" type="time" required /></label><label class="full-field"><span>内容</span><textarea name="text" rows="5" required placeholder="粘贴原始内容"></textarea></label></div>
+        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" type="submit">取消</button><button class="button solid" type="submit">添加并重新分析</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="playbookDialog" class="dialog compact-dialog">
+      <form id="playbookForm" method="dialog">
+        <div class="dialog-head"><div><span class="dialog-kicker">New playbook</span><h2>新建处置手册</h2><p>把团队反复使用的动作整理成可复用流程。</p></div><button class="header-icon" value="cancel" formmethod="dialog" type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="form-grid"><label class="full-field"><span>手册名称</span><input name="title" required placeholder="例如：数据导出阻塞" /></label><label class="full-field"><span>适用场景</span><input name="description" required placeholder="例如：批量导出超时、队列拥堵与客户上线风险" /></label><label class="full-field"><span>处置步骤</span><textarea name="steps" required rows="6" placeholder="每行一个步骤"></textarea></label></div>
+        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" type="submit">取消</button><button class="button solid" type="submit">保存手册</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="runPlaybookDialog" class="dialog compact-dialog">
+      <form id="runPlaybookForm" method="dialog">
+        <input type="hidden" name="playbookId" />
+        <div class="dialog-head"><div><span class="dialog-kicker">Run playbook</span><h2>套用处置手册</h2><p>选择目标事件，确认新增动作后再执行。</p></div><button class="header-icon" value="cancel" formmethod="dialog" type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="form-grid"><label class="full-field"><span>目标升级事件</span><select name="caseId" id="playbookCaseSelect"></select></label></div>
+        <div class="playbook-run-preview" id="playbookRunPreview"></div>
+        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" type="submit">取消</button><button class="button solid" type="submit">确认加入案件</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="retroDialog" class="dialog compact-dialog">
+      <form id="retroForm" method="dialog">
+        <div class="dialog-head"><div><span class="dialog-kicker">New review</span><h2>发起复盘</h2><p>把一次升级转成改进项，留给下一班人。</p></div><button class="header-icon" value="cancel" formmethod="dialog" type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="form-grid"><label><span>关联事件</span><select name="caseId" id="retroCaseSelect"></select></label><label><span>负责人</span><select name="owner"><option>林岚</option><option>周启</option><option>唐茜</option><option>韩舟</option></select></label><label class="full-field"><span>复盘主题</span><input name="title" required placeholder="例如：为什么这次事件没有提前预警" /></label><label class="full-field"><span>第一项改进动作</span><input name="action" required placeholder="例如：为 webhook 重试耗尽增加告警" /></label></div>
+        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" type="submit">取消</button><button class="button solid" type="submit">创建复盘</button></div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status"></div>
+    <script src="lucide.min.js?v=20260821-4"></script>
+    <script src="app.js?v=20260824-3"></script>
+  </body>
+</html>
