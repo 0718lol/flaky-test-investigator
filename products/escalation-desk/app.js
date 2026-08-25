@@ -14,7 +14,6 @@ const seedCases = [
     impact: "EU / 3 个租户",
     deadline: now + 42 * minute,
     slaTotal: 90 * minute,
-    confidence: 78,
     diagnosis: "故障高度集中在 4.18 发布后的 EU 支付 webhook。第三次重试耗尽后，支付状态没有回写到续费订单；目前没有证据表明账单核心服务或其他区域受影响。",
     facts: [
       "错误首次出现于 16:31 UTC，与 4.18 发布完成时间相差 4 分钟。",
@@ -35,7 +34,7 @@ const seedCases = [
     ],
     evidence: ["错误时间与发布窗口吻合", "区域对照排除核心账单服务", "三条来源指向同一重试链路"],
     sources: [
-      { type: "Zendesk 工单", time: "16:40", text: "客户 CFO 正在追问能否先付款、后恢复系统，续费窗口今天关闭。", impact: "客户压力上升，必须提供备用支付路径。" },
+      { type: "Zendesk 工单", time: "16:40", text: "客户 CFO 确认卡没有被扣款，正在追问能否先付款、后恢复系统；续费窗口今天关闭。", impact: "客户压力上升，必须提供备用支付路径。" },
       { type: "Slack", time: "16:43", text: "#payments：EU webhook delivery spike 后，重试在第三次全部耗尽。", impact: "故障范围收敛到 webhook worker。" },
       { type: "值班通话", time: "16:48", text: "CSM 已承诺 17:15 UTC 前更新，客户法务在等待状态说明。", impact: "已形成明确外部承诺。" },
       { type: "生产日志", time: "16:52", text: "payment.eu.callback timeout；US worker success；started after deploy 4.18。", impact: "根因假设有时间线与区域对照支撑。" },
@@ -58,7 +57,6 @@ const seedCases = [
     impact: "采购与法务",
     deadline: now + 3.4 * 60 * minute,
     slaTotal: 8 * 60 * minute,
-    confidence: 84,
     diagnosis: "阻塞点不是安全问卷本身，而是字段级权限边界、子处理器清单和数据删除路径未被组织成统一口径。现有资料已覆盖约 80%，剩余内容可由安全负责人一次补齐。",
     facts: ["采购明确接受先发简版、当天补完整附件。", "权限矩阵已有答案，缺少面向客户的边界说明。", "法务要求数据保留期限与删除路径保持一致。"],
     reply: "Northstar 团队，你们好。权限边界、数据流向和子处理器说明已完成内部复核，我们会在今天 18:00 前发送完整安全答复包。采购可先使用随信附上的简版答案继续内部流转。",
@@ -96,7 +94,6 @@ const seedCases = [
     impact: "单租户 / SSO",
     deadline: now + 96 * minute,
     slaTotal: 3 * 60 * minute,
-    confidence: 73,
     diagnosis: "现象更符合 IdP 元数据过期后未轮换，而不是 SSO 服务整体故障。签名验证只在该租户失败，重新导入元数据是当前最小且可逆的恢复动作。",
     facts: ["其他租户 SSO 正常，平台服务未出现错误峰值。", "失败日志明确包含 metadata expired。", "客户 staging 可用于无风险验证。"],
     reply: "Orbit 团队，你们好。我们已确认断点与本租户的 IdP 元数据轮换有关，不是 SSO 服务整体不可用。平台工程师正在 staging 验证新元数据，确认后再协助切换生产，明早上线计划暂不需要调整。下一次更新会在 23:00 前发出。",
@@ -133,9 +130,9 @@ const statusLabels = {
   resolved: "已解决",
 };
 
-const storageKey = "escalation-desk-state-v3";
-const legacyStorageKey = "escalation-desk-state-v2";
-const platformStorageKey = "relay-platform-state-v1";
+const workspaceStorageKey = "relay-workspace-state-v2";
+const legacyCaseStorageKeys = ["escalation-desk-state-v3", "escalation-desk-state-v2"];
+const legacyPlatformStorageKey = "relay-platform-state-v1";
 
 const defaultRetroRecords = [
   { id: "r1", date: "08-19", title: "EU 支付 webhook 重试耗尽", owner: "周启", status: "待跟进", actions: 4, caseId: "ESC-1842" },
@@ -154,51 +151,156 @@ const defaultAccounts = [
   { id: "acct-harbor", name: "Harbor Systems", initials: "HS", tier: "重点客户", industry: "软件", region: "欧洲", value: 390000, valueLabel: "$390k ARR", renewalDays: 55, csm: "唐茜", health: "watch", healthScore: 74, stage: "采用提升", products: ["Enterprise", "SSO"], contacts: [{ name: "Mila Rossi", role: "客户平台负责人" }], signals: ["管理员周活跃率下降 13%", "两个团队尚未完成 SSO 迁移"], nextSteps: ["安排管理员采用度工作坊", "确认 SSO 迁移计划"], activity: ["4 天前 · 识别到活跃度下降"], linkedCaseIds: [] },
 ];
 
-const platformState = (() => {
-  try {
-    const saved = JSON.parse(localStorage.getItem(platformStorageKey));
+const defaultPlaybooks = [
+  { id: "payment", builtIn: true, icon: "credit-card", title: "支付与续费故障", desc: "支付失败、重复扣款和续费窗口风险", runs: 18, updated: "2 天前", steps: ["确认扣款状态与影响订单", "冻结非必要发布并建立回滚点", "准备备用付款路径", "按承诺窗口更新客户"] },
+  { id: "security", builtIn: true, icon: "shield-check", title: "安全审查阻塞", desc: "问卷、字段权限与数据保留口径", runs: 12, updated: "5 天前", steps: ["拆分真正阻塞采购的未答项", "核对权限与法务口径", "指定单一对外负责人", "发送完整答复包"] },
+  { id: "sso", builtIn: true, icon: "key-round", title: "SSO 上线故障", desc: "元数据、证书和签名验证失败", runs: 9, updated: "1 周前", steps: ["确认租户级与平台级影响", "检查 IdP 元数据有效期", "在 staging 执行可逆验证", "确定生产切换窗口"] },
+  { id: "outage", builtIn: true, icon: "server-crash", title: "区域服务不可用", desc: "区域故障、降级与大面积客户沟通", runs: 7, updated: "2 周前", steps: ["建立统一事件指挥频道", "确认影响区域与核心路径", "发布首轮客户说明", "每 30 分钟同步进展"] },
+];
+
+const defaultShifts = [
+  { id: "shift-today", day: "今天", primary: "林岚", primaryRole: "升级负责人", specialist: "周启", specialistRole: "技术值班", hours: "09:00 - 18:00", state: "active" },
+  { id: "shift-sat", day: "周六", primary: "唐茜", primaryRole: "升级负责人", specialist: "韩舟", specialistRole: "安全支持", hours: "10:00 - 18:00", state: "scheduled" },
+  { id: "shift-sun", day: "周日", primary: "林岚", primaryRole: "升级负责人", specialist: "沈越", specialistRole: "平台支持", hours: "10:00 - 18:00", state: "scheduled" },
+  { id: "shift-mon", day: "周一", primary: "唐茜", primaryRole: "升级负责人", specialist: "周启", specialistRole: "技术值班", hours: "09:00 - 18:00", state: "scheduled" },
+];
+
+function cloneData(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function seedOperationalEvents() {
+  const categories = ["产品故障", "集成配置", "安全与合规", "商业流程"];
+  const owners = ["林岚", "唐茜", "周启", "韩舟"];
+  const accounts = defaultAccounts.map((account) => account.id);
+  return Array.from({ length: 72 }, (_, index) => {
+    const daysAgo = 1 + ((index * 11) % 89);
+    const firstResponseMinutes = 11 + ((index * 7) % 31);
+    const resolutionHours = 6 + ((index * 5) % 24);
+    const commitmentMet = index % 7 !== 0 && index % 11 !== 0;
     return {
-      handoffNote: saved?.handoffNote || "支付事件正在处置，下一次客户更新由林岚在 17:15 UTC 发出。",
-      retroRecords: Array.isArray(saved?.retroRecords) ? saved.retroRecords : defaultRetroRecords,
-      retroDone: new Set(Array.isArray(saved?.retroDone) ? saved.retroDone : []),
-      customPlaybooks: Array.isArray(saved?.customPlaybooks) ? saved.customPlaybooks : [],
-      playbookRuns: saved?.playbookRuns && typeof saved.playbookRuns === "object" ? saved.playbookRuns : {},
-      currentShift: saved?.currentShift || "林岚",
+      id: `hist-${String(index + 1).padStart(3, "0")}`,
+      accountId: accounts[index % accounts.length],
+      owner: owners[index % owners.length],
+      category: categories[index % categories.length],
+      openedAt: new Date(Date.now() - daysAgo * 24 * 60 * minute - (index % 9) * 60 * minute).toISOString(),
+      firstResponseMinutes,
+      resolutionHours,
+      commitmentMet,
+      slaMet: firstResponseMinutes <= 30 && resolutionHours <= 24,
+      riskValue: defaultAccounts[index % defaultAccounts.length].value,
+      status: "resolved",
     };
-  } catch {
-    return { handoffNote: "支付事件正在处置，下一次客户更新由林岚在 17:15 UTC 发出。", retroRecords: defaultRetroRecords, retroDone: new Set(), customPlaybooks: [], playbookRuns: {}, currentShift: "林岚" };
-  }
-})();
+  });
+}
+
+function normalizeAccounts(accounts) {
+  const contacts = [];
+  const normalized = accounts.map((account) => {
+    const contactIds = (account.contacts || []).map((contact, index) => {
+      const id = `contact-${account.id}-${index + 1}`;
+      contacts.push({ id, accountId: account.id, name: contact.name, role: contact.role, email: contact.email || "", phone: contact.phone || "" });
+      return id;
+    });
+    const { contacts: _contacts, ...record } = account;
+    return { ...record, contactIds };
+  });
+  return { accounts: normalized, contacts };
+}
+
+function normalizeCases(cases, accounts) {
+  return cases.map((item, index) => {
+    const account = accounts.find((entry) => entry.name === item.customer);
+    const deadline = item.deadlineOffset ? Date.now() + item.deadlineOffset : item.deadline || Date.now() + (index + 1) * 75 * minute;
+    return {
+      ...item,
+      accountId: item.accountId || account?.id || `acct-${item.id.toLowerCase()}`,
+      openedAt: item.openedAt || new Date(Date.now() - (index + 2) * 3 * 60 * minute).toISOString(),
+      firstResponseMinutes: item.firstResponseMinutes ?? [18, 26, 21][index % 3],
+      category: item.category || ["产品故障", "安全与合规", "集成配置"][index % 3],
+      commitmentMet: item.commitmentMet ?? item.status !== "waiting",
+      deadline,
+    };
+  });
+}
+
+function createWorkspaceSeed() {
+  const normalized = normalizeAccounts(cloneData(defaultAccounts));
+  return {
+    schemaVersion: 2,
+    meta: { workspaceId: "acme-cloud", name: "Acme Cloud", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+    accounts: normalized.accounts,
+    contacts: normalized.contacts,
+    cases: normalizeCases(cloneData(seedCases), normalized.accounts),
+    operationalEvents: seedOperationalEvents(),
+    shifts: cloneData(defaultShifts),
+    playbooks: cloneData(defaultPlaybooks),
+    retrospectives: cloneData(defaultRetroRecords),
+    settings: { selectedCaseId: seedCases[0].id, currentShift: "林岚", handoffNote: "支付事件正在处置，下一次客户更新由林岚在 17:15 UTC 发出。", retroDoneIds: [] },
+  };
+}
+
+function readLegacyJson(key) {
+  try { return JSON.parse(localStorage.getItem(key)); } catch { return null; }
+}
+
+function migrateWorkspace(existing) {
+  const seed = createWorkspaceSeed();
+  const legacyCases = legacyCaseStorageKeys.map(readLegacyJson).find((item) => item?.cases?.length);
+  const legacyPlatform = readLegacyJson(legacyPlatformStorageKey);
+  const source = existing || {};
+  const accountSource = Array.isArray(source.accounts) && source.accounts.length ? source.accounts : seed.accounts;
+  const normalizedSource = accountSource.some((account) => Array.isArray(account.contacts)) ? normalizeAccounts(accountSource) : { accounts: accountSource, contacts: [] };
+  const accounts = normalizedSource.accounts;
+  const cases = normalizeCases(source.cases?.length ? source.cases : legacyCases?.cases?.length ? legacyCases.cases : seed.cases, accounts);
+  const builtInIds = new Set(defaultPlaybooks.map((item) => item.id));
+  const sourcePlaybooks = Array.isArray(source.playbooks) ? source.playbooks : [];
+  const customPlaybooks = sourcePlaybooks.length ? sourcePlaybooks.filter((item) => !builtInIds.has(item.id)) : legacyPlatform?.customPlaybooks || [];
+  const sourceRunCounts = Object.fromEntries(sourcePlaybooks.filter((item) => builtInIds.has(item.id)).map((item) => [item.id, item.runs]));
+  const runCounts = legacyPlatform?.playbookRuns || {};
+  const playbooks = defaultPlaybooks.map((item) => ({ ...cloneData(item), runs: runCounts[item.id] ?? sourceRunCounts[item.id] ?? item.runs })).concat(customPlaybooks);
+  return {
+    ...seed,
+    ...source,
+    schemaVersion: 2,
+    accounts,
+    contacts: source.contacts?.length ? source.contacts : normalizedSource.contacts.length ? normalizedSource.contacts : seed.contacts,
+    cases,
+    operationalEvents: source.operationalEvents?.length ? source.operationalEvents : seed.operationalEvents,
+    shifts: source.shifts?.length ? source.shifts : seed.shifts,
+    playbooks,
+    retrospectives: source.retrospectives?.length ? source.retrospectives : legacyPlatform?.retroRecords || seed.retrospectives,
+    settings: {
+      ...seed.settings,
+      ...source.settings,
+      selectedCaseId: source.settings?.selectedCaseId || legacyCases?.selectedId || seed.settings.selectedCaseId,
+      currentShift: source.settings?.currentShift || legacyPlatform?.currentShift || seed.settings.currentShift,
+      handoffNote: source.settings?.handoffNote || legacyPlatform?.handoffNote || seed.settings.handoffNote,
+      retroDoneIds: source.settings?.retroDoneIds || legacyPlatform?.retroDone || [],
+    },
+  };
+}
+
+const workspaceRepository = new window.RelayWorkspaceStore({ key: workspaceStorageKey, schemaVersion: 2, createSeed: createWorkspaceSeed, migrate: migrateWorkspace });
+const workspaceDb = workspaceRepository.data;
+const retroDone = new Set(workspaceDb.settings.retroDoneIds);
+const platformState = {
+  get handoffNote() { return workspaceDb.settings.handoffNote; },
+  set handoffNote(value) { workspaceDb.settings.handoffNote = value; },
+  get currentShift() { return workspaceDb.settings.currentShift; },
+  set currentShift(value) { workspaceDb.settings.currentShift = value; },
+  retroRecords: workspaceDb.retrospectives,
+  retroDone,
+};
 
 function savePlatformState() {
-  localStorage.setItem(platformStorageKey, JSON.stringify({
-    handoffNote: platformState.handoffNote,
-    retroRecords: platformState.retroRecords,
-    retroDone: [...platformState.retroDone],
-    customPlaybooks: platformState.customPlaybooks,
-    playbookRuns: platformState.playbookRuns,
-    currentShift: platformState.currentShift,
-  }));
+  workspaceDb.settings.retroDoneIds = [...platformState.retroDone];
+  workspaceRepository.save();
 }
 
-function restoreState() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(storageKey) || localStorage.getItem(legacyStorageKey));
-    if (saved?.cases?.length) {
-      saved.cases.forEach((item, index) => {
-        if (item.deadlineOffset) item.deadline = Date.now() + item.deadlineOffset;
-        else if (!item.deadline) item.deadline = Date.now() + (index + 1) * 75 * minute;
-      });
-      return { cases: saved.cases, selectedId: saved.selectedId || saved.cases[0].id };
-    }
-  } catch {}
-  return { cases: seedCases, selectedId: seedCases[0].id };
-}
-
-const restored = restoreState();
 const state = {
-  cases: restored.cases,
-  selectedId: restored.selectedId,
+  cases: workspaceDb.cases,
+  selectedId: workspaceDb.settings.selectedCaseId || workspaceDb.cases[0].id,
   filter: "all",
   search: "",
   tab: "brief",
@@ -213,6 +315,10 @@ const elements = {
   app: document.getElementById("app"),
   caseList: document.getElementById("caseList"),
   activeCount: document.getElementById("activeCount"),
+  nearCommitmentCount: document.getElementById("nearCommitmentCount"),
+  queueMedianResponse: document.getElementById("queueMedianResponse"),
+  queueSlaRate: document.getElementById("queueSlaRate"),
+  todayResolved: document.getElementById("todayResolved"),
   sidebarCount: document.getElementById("sidebarCount"),
   caseSearch: document.getElementById("caseSearch"),
   queueFilters: document.getElementById("queueFilters"),
@@ -242,6 +348,15 @@ const elements = {
   newCaseForm: document.getElementById("newCaseForm"),
   sourceDialog: document.getElementById("sourceDialog"),
   sourceForm: document.getElementById("sourceForm"),
+  importDialog: document.getElementById("importDialog"),
+  importForm: document.getElementById("importForm"),
+  importFiles: document.getElementById("importFiles"),
+  importDropzone: document.getElementById("importDropzone"),
+  importFileCount: document.getElementById("importFileCount"),
+  importState: document.getElementById("importState"),
+  importPreview: document.getElementById("importPreview"),
+  previewImport: document.getElementById("previewImport"),
+  confirmImport: document.getElementById("confirmImport"),
   playbookDialog: document.getElementById("playbookDialog"),
   playbookForm: document.getElementById("playbookForm"),
   runPlaybookDialog: document.getElementById("runPlaybookDialog"),
@@ -275,14 +390,12 @@ function localTime(date) {
 }
 
 function saveState() {
-  const cases = state.cases.map((item) => ({
-    ...item,
-    deadlineOffset: item.deadline - Date.now(),
-  }));
-  localStorage.setItem(storageKey, JSON.stringify({ cases, selectedId: state.selectedId }));
+  workspaceDb.settings.selectedCaseId = state.selectedId;
+  workspaceRepository.save();
 }
 
 let toastTimer;
+let importPreviewSources = [];
 function showToast(message) {
   elements.toast.textContent = message;
   elements.toast.classList.add("show");
@@ -304,8 +417,15 @@ function filteredCases() {
 function renderQueue() {
   const cases = filteredCases();
   const activeCases = state.cases.filter((item) => item.status !== "resolved").length;
+  const thirtyDayCutoff = Date.now() - 30 * 24 * 60 * minute;
+  const sevenDayCutoff = Date.now() - 7 * 24 * 60 * minute;
+  const recentRecords = operationalRecords().filter((item) => new Date(item.openedAt).getTime() >= thirtyDayCutoff);
   elements.activeCount.textContent = String(activeCases);
   elements.sidebarCount.textContent = String(activeCases);
+  elements.nearCommitmentCount.textContent = String(state.cases.filter((item) => item.status !== "resolved" && item.deadline >= Date.now() && item.deadline - Date.now() <= 60 * minute).length);
+  elements.queueMedianResponse.textContent = String(Math.round(median(recentRecords.map((item) => item.firstResponseMinutes))));
+  elements.queueSlaRate.textContent = String(percentage(recentRecords.filter((item) => item.slaMet).length, recentRecords.length));
+  elements.todayResolved.textContent = String(operationalRecords().filter((item) => item.status === "resolved" && new Date(item.openedAt).getTime() >= sevenDayCutoff).length);
   elements.caseList.innerHTML = cases.length
     ? cases.map((item) => `
       <button class="case-item" type="button" data-case-id="${escapeHtml(item.id)}" aria-current="${item.id === state.selectedId}">
@@ -349,11 +469,12 @@ function renderHeader(item) {
 
 function renderBrief(item) {
   const completed = item.actions.filter((action) => action.done).length;
+  const analysis = item.analysis;
   elements.tabPanel.innerHTML = `
     <div class="analysis-state ${state.analyzing ? "processing" : ""}">
       <div>
-        <strong>${state.analyzing ? "正在重新分析现场信息…" : `本地规则已完成归因 · 可信度 ${item.confidence}%`}</strong>
-        <p>${state.analyzing ? "正在核对新增来源与当前结论是否冲突。" : `基于 ${item.sources.length} 条来源，最近更新于 ${escapeHtml(item.timeline[0]?.time || "刚刚")}。`}</p>
+        <strong>${state.analyzing ? "正在重新核对现场信息…" : `本地规则分析 · 匹配强度 ${escapeHtml(analysis.matchStrength)} · 证据完整度 ${analysis.evidenceCompleteness}%`}</strong>
+        <p>${state.analyzing ? "正在核对新增来源与当前判断是否冲突。" : `命中“${escapeHtml(analysis.profileLabel)}”规则，覆盖 ${analysis.sourceTypeCount} 类来源，更新于 ${escapeHtml(analysis.updatedAt)}。`}</p>
       </div>
       <button class="button secondary" id="reanalyzeButton" type="button" ${state.analyzing ? "disabled" : ""}>${state.analyzing ? "分析中" : "重新分析"}</button>
     </div>
@@ -365,11 +486,16 @@ function renderBrief(item) {
           <div class="diagnosis">
             <p>${escapeHtml(item.diagnosis)}</p>
             <div class="confidence-row">
-              <span>归因可信度</span>
-              <div><strong>${item.confidence}%</strong><div class="confidence-meter"><span style="width:${item.confidence}%"></span></div></div>
+              <span>证据完整度</span>
+              <div><strong>${analysis.evidenceCompleteness}%</strong><div class="confidence-meter"><span style="width:${analysis.evidenceCompleteness}%"></span></div></div>
             </div>
           </div>
           <ul class="fact-list">${item.facts.map((fact) => `<li>${escapeHtml(fact)}</li>`).join("")}</ul>
+        </section>
+
+        <section class="analysis-review-grid">
+          <div class="analysis-review conflicts"><div class="section-title"><h3>来源冲突</h3><span>${analysis.conflicts.length} 项</span></div>${analysis.conflicts.length ? analysis.conflicts.map((conflict) => `<article><i data-lucide="triangle-alert"></i><span><strong>${escapeHtml(conflict.title)}</strong><small>${escapeHtml(conflict.detail)}</small></span></article>`).join("") : '<div class="analysis-clear"><i data-lucide="circle-check"></i><span>未发现明确冲突</span></div>'}</div>
+          <div class="analysis-review unknowns"><div class="section-title"><h3>待确认</h3><span>${analysis.unknowns.length} 项</span></div>${analysis.unknowns.length ? `<ul>${analysis.unknowns.map((unknown) => `<li>${escapeHtml(unknown)}</li>`).join("")}</ul>` : '<div class="analysis-clear"><i data-lucide="circle-check"></i><span>关键材料已覆盖</span></div>'}</div>
         </section>
 
         <section class="work-section">
@@ -420,12 +546,12 @@ function renderSources(item) {
   elements.tabPanel.innerHTML = `
     <div class="source-toolbar">
       <div><h3>现场来源</h3><p>按原始时间保留，结论可追溯到每一条证据。</p></div>
-      <button class="button primary" id="addSourceButton" type="button"><b>＋</b> 添加来源</button>
+      <div class="source-actions"><button class="button quiet" id="batchImportButton" type="button"><i data-lucide="files"></i>批量导入</button><button class="button primary" id="addSourceButton" type="button"><i data-lucide="plus"></i>添加来源</button></div>
     </div>
     <div class="source-list">
       ${item.sources.map((source, index) => `
         <article class="source-item">
-          <div class="source-meta"><div><span class="source-type">${escapeHtml(source.type)}</span><span class="source-time">${escapeHtml(source.time)}</span></div><span class="source-tag">来源 ${index + 1}</span></div>
+          <div class="source-meta"><div><span class="source-type">${escapeHtml(source.type)}</span>${source.author ? `<span class="source-author">${escapeHtml(source.author)}</span>` : ""}<span class="source-time">${escapeHtml(source.time)}</span></div><span class="source-tag">来源 ${index + 1}</span></div>
           <p>${escapeHtml(source.text)}</p>
           <div class="source-impact">规则提取：${escapeHtml(source.impact)}</div>
         </article>
@@ -433,6 +559,7 @@ function renderSources(item) {
     </div>
   `;
   document.getElementById("addSourceButton").addEventListener("click", openSourceDialog);
+  document.getElementById("batchImportButton").addEventListener("click", openImportDialog);
 }
 
 function renderTimeline(item) {
@@ -447,11 +574,16 @@ function renderTimeline(item) {
 }
 
 function renderContext(item) {
+  const analysis = item.analysis;
   elements.peopleList.innerHTML = item.people.map((person) => `
     <div class="person-row"><span class="person-avatar">${escapeHtml(person.initials)}</span><div><strong>${escapeHtml(person.name)}</strong><span>${escapeHtml(person.role)}</span></div><i style="opacity:${person.online ? 1 : 0.2}"></i></div>
   `).join("");
-  elements.evidenceCount.textContent = `${item.evidence.length} 条`;
-  elements.evidenceList.innerHTML = item.evidence.map((evidence) => `<div class="evidence-item"><b>✓</b><span>${escapeHtml(evidence)}</span></div>`).join("");
+  elements.evidenceCount.textContent = `${item.evidence.length + analysis.conflicts.length + analysis.unknowns.length} 条`;
+  elements.evidenceList.innerHTML = [
+    ...item.evidence.map((evidence) => `<div class="evidence-item"><b><i data-lucide="check"></i></b><span>${escapeHtml(evidence)}</span></div>`),
+    ...analysis.conflicts.map((conflict) => `<div class="evidence-item conflict"><b><i data-lucide="triangle-alert"></i></b><span><strong>${escapeHtml(conflict.title)}</strong>${escapeHtml(conflict.detail)}</span></div>`),
+    ...analysis.unknowns.map((unknown) => `<div class="evidence-item unknown"><b><i data-lucide="help-circle"></i></b><span>待确认：${escapeHtml(unknown)}</span></div>`),
+  ].join("");
   updateClock();
 }
 
@@ -471,6 +603,7 @@ function render() {
   if (state.tab === "brief") renderBrief(item);
   if (state.tab === "sources") renderSources(item);
   if (state.tab === "timeline") renderTimeline(item);
+  window.lucide?.createIcons();
 }
 
 const moduleCopy = {
@@ -487,33 +620,11 @@ function moduleHead(view, action = "") {
 }
 
 function portfolioAccounts() {
-  const knownNames = new Set(defaultAccounts.map((account) => account.name));
-  const enriched = defaultAccounts.map((account) => ({
+  return workspaceDb.accounts.map((account) => ({
     ...account,
+    contacts: workspaceDb.contacts.filter((contact) => contact.accountId === account.id),
     linkedCaseIds: [...new Set([...account.linkedCaseIds, ...state.cases.filter((item) => item.customer === account.name).map((item) => item.id)])],
   }));
-  const generated = state.cases.filter((item) => !knownNames.has(item.customer)).map((item) => ({
-    id: `acct-${item.id.toLowerCase()}`,
-    name: item.customer,
-    initials: item.customer.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase(),
-    tier: item.priority === "P1" ? "战略客户" : "重点客户",
-    industry: "待补充",
-    region: "待补充",
-    value: Number(String(item.risk).replace(/[^0-9.]/g, "")) * (String(item.risk).toLowerCase().includes("k") ? 1000 : 1),
-    valueLabel: item.risk,
-    renewalDays: 90,
-    csm: item.owner,
-    health: item.priority === "P1" ? "critical" : "watch",
-    healthScore: item.priority === "P1" ? 58 : 70,
-    stage: "升级处理中",
-    products: ["待补充"],
-    contacts: [{ name: "待补充联系人", role: "客户项目负责人" }],
-    signals: [item.title, item.subtitle],
-    nextSteps: item.actions.filter((action) => !action.done).slice(0, 2).map((action) => action.text),
-    activity: [`今天 · 创建升级事件 ${item.id}`],
-    linkedCaseIds: [item.id],
-  }));
-  return [...enriched, ...generated];
 }
 
 function renderCustomers() {
@@ -565,35 +676,25 @@ function renderCustomers() {
 }
 
 function renderOncall() {
-  const shifts = [
-    ["今天", "林岚", "升级负责人", "周启", "技术值班", "09:00 - 18:00"],
-    ["周六", "唐茜", "升级负责人", "韩舟", "安全支持", "10:00 - 18:00"],
-    ["周日", "林岚", "升级负责人", "沈越", "平台支持", "10:00 - 18:00"],
-    ["周一", "唐茜", "升级负责人", "周启", "技术值班", "09:00 - 18:00"],
-  ];
+  const shifts = workspaceDb.shifts;
+  const currentShift = shifts.find((shift) => shift.state === "active") || shifts[0];
   return `${moduleHead("oncall", '<button class="button quiet" type="button" data-module-action="copy-handoff"><i data-lucide="copy"></i>复制交接摘要</button>')}
     <section class="oncall-now">
-      <div><span class="live-label"><i></i>当前班次</span><h2>${platformState.currentShift} 正在负责升级响应</h2><p>技术值班：周启 · 下次交接 18:00 · 当前 ${state.cases.filter((item) => item.status !== "resolved").length} 起处理中</p><label class="handoff-label" for="handoffNote">交接备注</label><textarea id="handoffNote" class="handoff-note" rows="3">${escapeHtml(platformState.handoffNote)}</textarea><button class="button solid handoff-save" type="button" data-module-action="save-handoff"><i data-lucide="save"></i>保存交接</button></div>
-      <div class="oncall-people"><span>岚</span><span>启</span><button type="button" data-module-action="take-shift">接管当前班次</button><button type="button" data-module-action="open-roster">查看联系方式</button></div>
+      <div><span class="live-label"><i></i>当前班次</span><h2>${escapeHtml(currentShift.primary)} 正在负责升级响应</h2><p>${escapeHtml(currentShift.specialistRole)}：${escapeHtml(currentShift.specialist)} · 下次交接 ${escapeHtml(currentShift.hours.split(" - ")[1])} · 当前 ${state.cases.filter((item) => item.status !== "resolved").length} 起处理中</p><label class="handoff-label" for="handoffNote">交接备注</label><textarea id="handoffNote" class="handoff-note" rows="3">${escapeHtml(platformState.handoffNote)}</textarea><button class="button solid handoff-save" type="button" data-module-action="save-handoff"><i data-lucide="save"></i>保存交接</button></div>
+      <div class="oncall-people"><span>${escapeHtml(currentShift.primary.slice(-1))}</span><span>${escapeHtml(currentShift.specialist.slice(-1))}</span><button type="button" data-module-action="take-shift">接管当前班次</button><button type="button" data-module-action="open-roster">查看联系方式</button></div>
     </section>
     <section class="module-surface">
       <div class="module-section-head"><div><h2>本周覆盖</h2><p>主负责人和专业支持双人覆盖</p></div><span>UTC+8</span></div>
-      <div class="shift-list">${shifts.map((shift, index) => `<article class="shift-row ${index === 0 ? "current" : ""}">
-        <div><strong>${shift[0]}</strong><small>${shift[5]}</small></div>
-        <div class="shift-person"><span>${shift[1].slice(-1)}</span><div><strong>${shift[1]}</strong><small>${shift[2]}</small></div></div>
-        <div class="shift-person"><span>${shift[3].slice(-1)}</span><div><strong>${shift[3]}</strong><small>${shift[4]}</small></div></div>
-        <span class="coverage-state">${index === 0 ? "值班中" : "已排班"}</span>
+      <div class="shift-list">${shifts.map((shift) => `<article class="shift-row ${shift.state === "active" ? "current" : ""}">
+        <div><strong>${escapeHtml(shift.day)}</strong><small>${escapeHtml(shift.hours)}</small></div>
+        <div class="shift-person"><span>${escapeHtml(shift.primary.slice(-1))}</span><div><strong>${escapeHtml(shift.primary)}</strong><small>${escapeHtml(shift.primaryRole)}</small></div></div>
+        <div class="shift-person"><span>${escapeHtml(shift.specialist.slice(-1))}</span><div><strong>${escapeHtml(shift.specialist)}</strong><small>${escapeHtml(shift.specialistRole)}</small></div></div>
+        <span class="coverage-state">${shift.state === "active" ? "值班中" : "已排班"}</span>
       </article>`).join("")}</div>
     </section>`;
 }
 
-let playbooks = [
-  { id: "payment", icon: "credit-card", title: "支付与续费故障", desc: "支付失败、重复扣款和续费窗口风险", runs: platformState.playbookRuns.payment ?? 18, updated: "2 天前", steps: ["确认扣款状态与影响订单", "冻结非必要发布并建立回滚点", "准备备用付款路径", "按承诺窗口更新客户"] },
-  { id: "security", icon: "shield-check", title: "安全审查阻塞", desc: "问卷、字段权限与数据保留口径", runs: platformState.playbookRuns.security ?? 12, updated: "5 天前", steps: ["拆分真正阻塞采购的未答项", "核对权限与法务口径", "指定单一对外负责人", "发送完整答复包"] },
-  { id: "sso", icon: "key-round", title: "SSO 上线故障", desc: "元数据、证书和签名验证失败", runs: platformState.playbookRuns.sso ?? 9, updated: "1 周前", steps: ["确认租户级与平台级影响", "检查 IdP 元数据有效期", "在 staging 执行可逆验证", "确定生产切换窗口"] },
-  { id: "outage", icon: "server-crash", title: "区域服务不可用", desc: "区域故障、降级与大面积客户沟通", runs: platformState.playbookRuns.outage ?? 7, updated: "2 周前", steps: ["建立统一事件指挥频道", "确认影响区域与核心路径", "发布首轮客户说明", "每 30 分钟同步进展"] },
-  ...platformState.customPlaybooks,
-];
+let playbooks = workspaceDb.playbooks;
 
 function renderPlaybooks() {
   const query = state.search.trim().toLowerCase();
@@ -612,70 +713,142 @@ function renderPlaybooks() {
     </section></div>`;
 }
 
-const reportSnapshots = {
-  "7d": {
-    label: "近 7 天",
-    range: "8 月 18 日 - 8 月 24 日",
-    total: 22,
-    metrics: [["首次响应中位数", "21", "m", "较上期慢 3m", "watch"], ["SLA 达标率", "96", "%", "高于目标 4%", "good"], ["平均解决时长", "11", "h", "较上期缩短 3h", "good"], ["承诺逾期", "5", "", "其中 2 起未关闭", "bad"]],
-    funnel: [["进入升级", 22, 100], ["30 分钟内响应", 21, 95], ["按时兑现承诺", 17, 77], ["SLA 内解决", 16, 73]],
-    trend: [["周一", 5, 92, 88], ["周二", 2, 100, 100], ["周三", 4, 95, 82], ["周四", 3, 97, 91], ["周五", 6, 93, 76], ["周末", 2, 100, 100]],
-    reasons: [["产品故障", 36, 18, "$420k"], ["集成配置", 27, 11, "$180k"], ["安全与合规", 23, 8, "$600k"], ["商业流程", 14, 5, "$240k"]],
-  },
-  "30d": {
-    label: "近 30 天",
-    range: "7 月 26 日 - 8 月 24 日",
-    total: 76,
-    metrics: [["首次响应中位数", "18", "m", "较上期快 4m", "good"], ["SLA 达标率", "94", "%", "高于目标 2%", "good"], ["平均解决时长", "14", "h", "较上期缩短 1.8h", "good"], ["承诺逾期", "8", "", "3 起需要复盘", "bad"]],
-    funnel: [["进入升级", 76, 100], ["30 分钟内响应", 71, 93], ["按时兑现承诺", 64, 84], ["SLA 内解决", 59, 78]],
-    trend: [["第 1 周", 16, 91, 82], ["第 2 周", 19, 94, 86], ["第 3 周", 18, 96, 89], ["本周", 23, 94, 84]],
-    reasons: [["产品故障", 38, 16, "$1.1m"], ["集成配置", 27, 12, "$640k"], ["安全与合规", 21, 7, "$920k"], ["商业流程", 14, 4, "$480k"]],
-  },
-  "90d": {
-    label: "近 90 天",
-    range: "5 月 27 日 - 8 月 24 日",
-    total: 214,
-    metrics: [["首次响应中位数", "24", "m", "较上期慢 2m", "watch"], ["SLA 达标率", "92", "%", "达到团队目标", "good"], ["平均解决时长", "17", "h", "较上期缩短 2h", "good"], ["承诺逾期", "12", "", "重复原因占 42%", "bad"]],
-    funnel: [["进入升级", 214, 100], ["30 分钟内响应", 196, 92], ["按时兑现承诺", 176, 82], ["SLA 内解决", 160, 75]],
-    trend: [["6 月", 68, 90, 80], ["7 月", 70, 92, 83], ["8 月", 76, 94, 84]],
-    reasons: [["产品故障", 41, 17, "$2.8m"], ["集成配置", 25, 10, "$1.6m"], ["安全与合规", 19, 8, "$2.1m"], ["商业流程", 15, 5, "$1.2m"]],
-  },
-};
+function median(values) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
 
-const reportRiskMeta = {
-  "ESC-1842": { signal: "续费窗口今天关闭，CFO 已介入", promise: "42 分钟", promiseState: "临近", tone: "critical" },
-  "ESC-1837": { signal: "合同签署等待完整安全答复包", promise: "3.4 小时", promiseState: "待客户", tone: "watch" },
-  "ESC-1829": { signal: "明早全员上线，SSO 尚未恢复", promise: "96 分钟", promiseState: "处置中", tone: "watch" },
-};
+function percentage(count, total) {
+  return total ? Math.round(count / total * 100) : 0;
+}
 
-const reportOwners = [
-  { name: "林岚", role: "升级负责人", active: 7, response: "16m", sla: 97, load: 88, status: "接近上限" },
-  { name: "唐茜", role: "客户成功", active: 5, response: "19m", sla: 95, load: 64, status: "正常" },
-  { name: "周启", role: "技术值班", active: 4, response: "22m", sla: 92, load: 72, status: "正常" },
-  { name: "韩舟", role: "安全支持", active: 3, response: "28m", sla: 89, load: 46, status: "需关注" },
-];
+function riskValueForCase(item) {
+  return workspaceDb.accounts.find((account) => account.id === item.accountId)?.value
+    || Number(String(item.risk).replace(/[^0-9.]/g, "")) * (String(item.risk).toLowerCase().includes("k") ? 1000 : 1);
+}
+
+function formatMoney(value) {
+  if (value >= 1000000) return `$${(value / 1000000).toFixed(1)}m`;
+  return `$${Math.round(value / 1000)}k`;
+}
+
+function operationalRecords() {
+  const liveCases = state.cases.map((item) => {
+    const elapsedHours = Math.max(0, (Date.now() - new Date(item.openedAt).getTime()) / (60 * minute));
+    const resolutionHours = item.status === "resolved" ? item.resolutionHours ?? elapsedHours : null;
+    return {
+      id: item.id,
+      accountId: item.accountId,
+      owner: item.owner,
+      category: item.category || "商业流程",
+      openedAt: item.openedAt,
+      firstResponseMinutes: item.firstResponseMinutes,
+      resolutionHours,
+      commitmentMet: item.commitmentMet !== false && item.deadline >= Date.now(),
+      slaMet: item.firstResponseMinutes <= 30 && (resolutionHours === null || resolutionHours <= 24),
+      riskValue: riskValueForCase(item),
+      status: item.status,
+    };
+  });
+  return [...workspaceDb.operationalEvents, ...liveCases];
+}
+
+function periodConfig() {
+  return { "7d": { days: 7, label: "近 7 天", buckets: 7 }, "30d": { days: 30, label: "近 30 天", buckets: 4 }, "90d": { days: 90, label: "近 90 天", buckets: 3 } }[state.reportPeriod];
+}
+
+function formatReportDate(date) {
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
+}
+
+function reportTrend(records, days, bucketCount) {
+  const end = Date.now();
+  const bucketDays = days / bucketCount;
+  return Array.from({ length: bucketCount }, (_, index) => {
+    const startAt = end - (days - index * bucketDays) * 24 * 60 * minute;
+    const endAt = end - (days - (index + 1) * bucketDays) * 24 * 60 * minute;
+    const bucket = records.filter((record) => {
+      const opened = new Date(record.openedAt).getTime();
+      return opened >= startAt && opened <= endAt;
+    });
+    const label = days === 7
+      ? new Intl.DateTimeFormat("zh-CN", { weekday: "short" }).format(new Date((startAt + endAt) / 2))
+      : days === 30 ? (index === bucketCount - 1 ? "本周" : `第 ${index + 1} 周`)
+        : new Intl.DateTimeFormat("zh-CN", { month: "short" }).format(new Date((startAt + endAt) / 2));
+    return [label, bucket.length, percentage(bucket.filter((item) => item.slaMet).length, bucket.length), percentage(bucket.filter((item) => item.commitmentMet).length, bucket.length)];
+  });
+}
+
+function ownerPerformance(records) {
+  const activeCases = state.cases.filter((item) => item.status !== "resolved");
+  const names = [...new Set([...records.map((item) => item.owner), ...workspaceDb.shifts.flatMap((shift) => [shift.primary, shift.specialist])])].filter(Boolean);
+  return names.map((name) => {
+    const owned = records.filter((item) => item.owner === name);
+    const active = activeCases.filter((item) => item.owner === name).length;
+    const load = Math.min(100, active * 28 + Math.min(24, owned.length * 2));
+    const role = workspaceDb.shifts.flatMap((shift) => [[shift.primary, shift.primaryRole], [shift.specialist, shift.specialistRole]]).find(([person]) => person === name)?.[1] || "协作成员";
+    const sla = owned.length ? percentage(owned.filter((item) => item.slaMet).length, owned.length) : null;
+    return { name, role, active, response: owned.length ? `${Math.round(median(owned.map((item) => item.firstResponseMinutes)))}m` : "—", sla, load, status: !owned.length ? "暂无样本" : load >= 85 ? "接近上限" : sla < 92 ? "需关注" : "正常" };
+  }).sort((a, b) => b.load - a.load);
+}
 
 function currentReportSnapshot() {
-  return reportSnapshots[state.reportPeriod];
+  const config = periodConfig();
+  const cutoff = Date.now() - config.days * 24 * 60 * minute;
+  const records = operationalRecords().filter((item) => new Date(item.openedAt).getTime() >= cutoff);
+  const total = records.length;
+  const respondedRecords = records.filter((item) => item.firstResponseMinutes <= 30);
+  const responded = respondedRecords.length;
+  const commitmentMet = records.filter((item) => item.commitmentMet).length;
+  const committedAfterResponse = respondedRecords.filter((item) => item.commitmentMet);
+  const resolvedInSla = committedAfterResponse.filter((item) => item.status === "resolved" && item.slaMet).length;
+  const resolved = records.filter((item) => item.status === "resolved");
+  const breachCount = total - commitmentMet;
+  const categories = ["产品故障", "集成配置", "安全与合规", "商业流程"];
+  return {
+    label: config.label,
+    range: `${formatReportDate(new Date(cutoff))} - ${formatReportDate(new Date())}`,
+    total,
+    metrics: [
+      ["首次响应中位数", String(Math.round(median(records.map((item) => item.firstResponseMinutes)))), "m", "来自统一事件记录", "neutral"],
+      ["SLA 达标率", String(percentage(records.filter((item) => item.slaMet).length, total)), "%", "目标 92%", percentage(records.filter((item) => item.slaMet).length, total) >= 92 ? "good" : "watch"],
+      ["解决时长中位数", String(Math.round(median(resolved.map((item) => item.resolutionHours)))), "h", `${resolved.length} 起已解决事件`, "neutral"],
+      ["承诺逾期", String(breachCount), "", `${state.cases.filter((item) => item.status !== "resolved" && item.deadline < Date.now()).length} 起仍未关闭`, breachCount ? "bad" : "good"],
+    ],
+    funnel: [["进入升级", total, 100], ["30 分钟内响应", responded, percentage(responded, total)], ["按时兑现承诺", committedAfterResponse.length, percentage(committedAfterResponse.length, total)], ["SLA 内解决", resolvedInSla, percentage(resolvedInSla, total)]],
+    trend: reportTrend(records, config.days, config.buckets),
+    reasons: categories.map((category) => {
+      const group = records.filter((item) => item.category === category);
+      return [category, percentage(group.length, total), percentage(group.filter((item) => !item.commitmentMet).length, group.length), formatMoney(group.reduce((sum, item) => sum + (item.riskValue || 0), 0))];
+    }),
+    owners: ownerPerformance(records),
+  };
 }
 
 function reportSummaryText(snapshot) {
-  return `Relay ${snapshot.label}运营摘要（${snapshot.range}）：共 ${snapshot.total} 起升级，SLA 达标率 ${snapshot.metrics[1][1]}%，首次响应中位数 ${snapshot.metrics[0][1]} 分钟，承诺逾期 ${snapshot.metrics[3][1]} 起。当前优先处理 Apex Health 的续费支付事件，并跟进 Northstar Bio 的安全答复包。`;
+  const priority = state.cases.filter((item) => item.status !== "resolved").sort((a, b) => a.deadline - b.deadline)[0];
+  return `Relay ${snapshot.label}运营摘要（${snapshot.range}）：共 ${snapshot.total} 起升级，SLA 达标率 ${snapshot.metrics[1][1]}%，首次响应中位数 ${snapshot.metrics[0][1]} 分钟，承诺逾期 ${snapshot.metrics[3][1]} 起。${priority ? `当前最优先处理 ${priority.customer} 的“${priority.title}”。` : "当前没有未关闭升级事件。"}`;
 }
 
 function renderReports() {
   const snapshot = currentReportSnapshot();
   const query = state.search.trim().toLowerCase();
-  const riskRows = state.cases.filter((item) => !query || `${item.id} ${item.customer} ${item.owner} ${item.title}`.toLowerCase().includes(query));
-  const ownerRows = reportOwners.filter((item) => !query || `${item.name} ${item.role}`.toLowerCase().includes(query));
+  const riskRows = state.cases.filter((item) => item.status !== "resolved" && (!query || `${item.id} ${item.customer} ${item.owner} ${item.title}`.toLowerCase().includes(query))).sort((a, b) => a.deadline - b.deadline);
+  const ownerRows = snapshot.owners.filter((item) => !query || `${item.name} ${item.role}`.toLowerCase().includes(query));
+  const nextDue = riskRows[0];
+  const waiting = state.cases.filter((item) => item.status === "waiting").sort((a, b) => new Date(a.openedAt) - new Date(b.openedAt))[0];
+  const openRetros = workspaceDb.retrospectives.filter((item) => !state.retroDone.has(item.id) && item.status !== "已完成");
+  const dueMinutes = nextDue ? Math.max(0, Math.round((nextDue.deadline - Date.now()) / minute)) : 0;
   const periodControl = `<div class="period-control">${Object.entries({ "7d": "7 天", "30d": "30 天", "90d": "90 天" }).map(([id, label]) => `<button type="button" data-module-action="report-period" data-period="${id}" aria-pressed="${state.reportPeriod === id}">${label}</button>`).join("")}</div>`;
   return `${moduleHead("reports", `<div class="report-head-actions"><button class="button quiet" type="button" data-module-action="copy-report"><i data-lucide="copy"></i>复制摘要</button><button class="button quiet" type="button" data-module-action="export-report"><i data-lucide="download"></i>导出</button>${periodControl}</div>`)}
     <section class="report-briefing">
       <div class="report-briefing-head"><div><span class="page-eyebrow">需要处理</span><h2>本周期运营结论</h2></div><span>${snapshot.range} · 刚刚更新</span></div>
       <div class="report-signals">
-        <button type="button" data-module-action="open-case" data-case-id="ESC-1842"><i class="signal-icon critical" data-lucide="clock-alert"></i><span><b>承诺风险</b><strong>2 个客户更新将在 60 分钟内到期</strong><small>Apex Health 的续费窗口最紧迫</small></span><i data-lucide="arrow-up-right"></i></button>
-        <button type="button" data-module-action="open-case" data-case-id="ESC-1837"><i class="signal-icon watch" data-lucide="circle-pause"></i><span><b>等待阻塞</b><strong>安全答复已让合同停滞 3.4 小时</strong><small>阻塞集中在统一对外口径</small></span><i data-lucide="arrow-up-right"></i></button>
-        <button type="button" data-module-action="open-retros"><i class="signal-icon neutral" data-lucide="repeat-2"></i><span><b>重复问题</b><strong>3 项复盘动作仍未关闭</strong><small>支付重试与 SSO 预警再次出现</small></span><i data-lucide="arrow-up-right"></i></button>
+        <button type="button" ${nextDue ? `data-module-action="open-case" data-case-id="${escapeHtml(nextDue.id)}"` : "disabled"}><i class="signal-icon critical" data-lucide="clock-alert"></i><span><b>承诺风险</b><strong>${nextDue ? `${escapeHtml(nextDue.customer)} 的更新剩余 ${dueMinutes} 分钟` : "当前没有未关闭承诺"}</strong><small>${nextDue ? escapeHtml(nextDue.title) : "风险队列已清空"}</small></span><i data-lucide="arrow-up-right"></i></button>
+        <button type="button" ${waiting ? `data-module-action="open-case" data-case-id="${escapeHtml(waiting.id)}"` : "disabled"}><i class="signal-icon watch" data-lucide="circle-pause"></i><span><b>等待阻塞</b><strong>${waiting ? `${escapeHtml(waiting.customer)} 正在等待外部输入` : "当前没有等待中的案件"}</strong><small>${waiting ? escapeHtml(waiting.actions.find((item) => !item.done)?.text || waiting.title) : "没有待客户状态"}</small></span><i data-lucide="arrow-up-right"></i></button>
+        <button type="button" data-module-action="open-retros"><i class="signal-icon neutral" data-lucide="repeat-2"></i><span><b>复盘改进</b><strong>${openRetros.length} 项复盘仍未关闭</strong><small>${openRetros[0] ? escapeHtml(openRetros[0].title) : "改进项已全部关闭"}</small></span><i data-lucide="arrow-up-right"></i></button>
       </div>
     </section>
 
@@ -687,18 +860,21 @@ function renderReports() {
     </div>
 
     <div class="report-detail-grid">
-      <section class="module-surface risk-queue" id="reportRiskQueue"><div class="module-section-head"><div><h2>风险客户队列</h2><p>按商业风险和下一次外部承诺排序</p></div><span>${riskRows.length} 个当前事件</span></div><div class="risk-table"><div class="risk-row risk-head"><span>客户与信号</span><span>商业风险</span><span>下一承诺</span><span>负责人</span><span></span></div>${riskRows.map((item) => { const meta = reportRiskMeta[item.id] || { signal: item.title, promise: localTime(new Date(item.deadline)), promiseState: statusLabels[item.status], tone: "watch" }; return `<div class="risk-row"><span class="risk-account"><b>${escapeHtml(item.customer)}</b><small>${escapeHtml(meta.signal)}</small></span><strong>${escapeHtml(item.risk)}</strong><span class="promise-cell ${meta.tone}"><b>${escapeHtml(meta.promise)}</b><small>${escapeHtml(meta.promiseState)}</small></span><span>${escapeHtml(item.owner)}</span><button class="row-action" type="button" data-module-action="open-case" data-case-id="${escapeHtml(item.id)}" aria-label="打开 ${escapeHtml(item.id)}"><i data-lucide="arrow-right"></i></button></div>`; }).join("") || '<div class="queue-empty">没有匹配的风险客户</div>'}</div></section>
+      <section class="module-surface risk-queue" id="reportRiskQueue"><div class="module-section-head"><div><h2>风险客户队列</h2><p>按下一次外部承诺排序</p></div><span>${riskRows.length} 个当前事件</span></div><div class="risk-table"><div class="risk-row risk-head"><span>客户与信号</span><span>商业风险</span><span>下一承诺</span><span>负责人</span><span></span></div>${riskRows.map((item) => { const remaining = Math.round((item.deadline - Date.now()) / minute); const tone = remaining <= 60 ? "critical" : "watch"; const promise = remaining < 0 ? `逾期 ${Math.abs(remaining)} 分钟` : remaining < 120 ? `${remaining} 分钟` : localTime(new Date(item.deadline)); return `<div class="risk-row"><span class="risk-account"><b>${escapeHtml(item.customer)}</b><small>${escapeHtml(item.title)}</small></span><strong>${escapeHtml(item.risk)}</strong><span class="promise-cell ${tone}"><b>${escapeHtml(promise)}</b><small>${escapeHtml(statusLabels[item.status])}</small></span><span>${escapeHtml(item.owner)}</span><button class="row-action" type="button" data-module-action="open-case" data-case-id="${escapeHtml(item.id)}" aria-label="打开 ${escapeHtml(item.id)}"><i data-lucide="arrow-right"></i></button></div>`; }).join("") || '<div class="queue-empty">没有匹配的风险客户</div>'}</div></section>
       <section class="module-surface reason-panel"><div class="module-section-head"><div><h2>升级原因</h2><p>占比、逾期率与风险金额</p></div></div><div class="reason-matrix"><div class="reason-row reason-head"><span>原因</span><span>占比</span><span>逾期</span><span>风险</span></div>${snapshot.reasons.map(([label, share, breach, arr]) => `<div class="reason-row"><strong>${label}</strong><span><i style="width:${share}%"></i><b>${share}%</b></span><em class="${breach >= 15 ? "bad" : ""}">${breach}%</em><small>${arr}</small></div>`).join("")}</div></section>
     </div>
 
-    <section class="module-surface owner-load"><div class="module-section-head"><div><h2>团队负载</h2><p>识别响应瓶颈与单点压力</p></div><button class="text-action" type="button" data-module-action="open-oncall">调整值班安排<i data-lucide="arrow-right"></i></button></div><div class="owner-load-table"><div class="owner-load-row owner-load-head"><span>成员</span><span>处理中</span><span>响应中位数</span><span>SLA</span><span>负载</span><span>状态</span></div>${ownerRows.map((owner) => `<div class="owner-load-row"><div><span class="owner-avatar">${owner.name.slice(-1)}</span><span><strong>${owner.name}</strong><small>${owner.role}</small></span></div><strong>${owner.active}</strong><span>${owner.response}</span><span>${owner.sla}%</span><span class="load-cell"><i><b style="width:${owner.load}%"></b></i><em>${owner.load}%</em></span><span class="load-status ${owner.status === "接近上限" ? "bad" : owner.status === "需关注" ? "watch" : ""}">${owner.status}</span></div>`).join("") || '<div class="queue-empty">没有匹配的团队成员</div>'}</div></section>`;
+    <section class="module-surface owner-load"><div class="module-section-head"><div><h2>团队负载</h2><p>识别响应瓶颈与单点压力</p></div><button class="text-action" type="button" data-module-action="open-oncall">调整值班安排<i data-lucide="arrow-right"></i></button></div><div class="owner-load-table"><div class="owner-load-row owner-load-head"><span>成员</span><span>处理中</span><span>响应中位数</span><span>SLA</span><span>负载</span><span>状态</span></div>${ownerRows.map((owner) => `<div class="owner-load-row"><div><span class="owner-avatar">${owner.name.slice(-1)}</span><span><strong>${owner.name}</strong><small>${owner.role}</small></span></div><strong>${owner.active}</strong><span>${owner.response}</span><span>${owner.sla === null ? "—" : `${owner.sla}%`}</span><span class="load-cell"><i><b style="width:${owner.load}%"></b></i><em>${owner.load}%</em></span><span class="load-status ${owner.status === "接近上限" ? "bad" : owner.status === "需关注" ? "watch" : ""}">${owner.status}</span></div>`).join("") || '<div class="queue-empty">没有匹配的团队成员</div>'}</div></section>`;
 }
 
 function renderRetros() {
   const query = state.search.trim().toLowerCase();
   const visible = platformState.retroRecords.filter((item) => !query || `${item.title} ${item.owner} ${item.caseId}`.toLowerCase().includes(query));
+  const completed = platformState.retroRecords.filter((item) => state.retroDone.has(item.id) || item.status === "已完成").length;
+  const openActions = platformState.retroRecords.filter((item) => !state.retroDone.has(item.id) && item.status !== "已完成").reduce((sum, item) => sum + item.actions, 0);
+  const completionRate = percentage(completed, platformState.retroRecords.length);
   return `${moduleHead("retros", '<button class="button solid" type="button" data-module-action="new-retro"><i data-lucide="plus"></i>发起复盘</button>')}
-    <section class="retro-summary"><div><strong>3</strong><span>待关闭改进项</span></div><div><strong>86%</strong><span>按期完成率</span></div><p><i data-lucide="trending-down"></i>重复升级较上月下降 12%</p></section>
+    <section class="retro-summary"><div><strong>${openActions}</strong><span>待关闭改进项</span></div><div><strong>${completionRate}%</strong><span>复盘关闭率</span></div><p><i data-lucide="database"></i>${platformState.retroRecords.length} 条复盘记录已纳入统一工作区</p></section>
     <section class="module-surface"><div class="module-section-head"><div><h2>最近复盘</h2><p>根因和改进动作统一跟踪</p></div><span>${visible.length} 条记录</span></div><div class="retro-list">${visible.map((item) => `<article>
       <label><input type="checkbox" data-retro-id="${item.id}" ${state.retroDone.has(item.id) ? "checked" : ""}><span></span></label><time>${item.date}</time><div><strong>${item.title}</strong><small>${item.caseId} · 负责人 ${item.owner} · ${item.actions} 项改进动作</small></div><span class="state-pill ${item.status === "已完成" || state.retroDone.has(item.id) ? "resolved" : item.status === "待跟进" ? "waiting" : ""}">${state.retroDone.has(item.id) ? "已完成" : item.status}</span><button class="row-action" type="button" data-module-action="open-case" data-case-id="${item.caseId}"><i data-lucide="arrow-right"></i></button>
     </article>`).join("") || '<div class="queue-empty">没有匹配的复盘记录</div>'}</div></section>`;
@@ -815,6 +991,66 @@ function sourceImpactFor(text, profile) {
   return `补充了${profile.label}场景的现场上下文。`;
 }
 
+function detectSourceConflicts(sources) {
+  const records = sources.map((source, index) => ({ ...source, sourceId: `source-${index + 1}`, normalized: source.text.toLowerCase() }));
+  const conflicts = [];
+  const addConflict = (title, detail, matching) => {
+    if (!matching.length || conflicts.some((item) => item.title === title)) return;
+    conflicts.push({ title, detail, sourceIds: matching.map((item) => item.sourceId) });
+  };
+  ["EU", "US", "APAC"].forEach((region) => {
+    const regional = records.flatMap((item) => item.text.split(/[；;。\n]/).filter((clause) => clause.toLowerCase().includes(region.toLowerCase())).map((clause) => ({ ...item, normalized: clause.toLowerCase() })));
+    const healthy = regional.filter((item) => /正常|成功|未受影响|无异常|success/.test(item.normalized));
+    const failing = regional.filter((item) => /失败|异常|超时|不可用|中断|failed|timeout/.test(item.normalized));
+    if (healthy.length && failing.length) addConflict(`${region} 区状态冲突`, `${healthy[0].type}显示 ${region} 正常或未受影响，但${failing[0].type}报告该区域存在失败。`, [healthy[0], failing[0]]);
+  });
+  const charged = records.filter((item) => /已扣款|已经扣款|扣款成功/.test(item.normalized));
+  const notCharged = records.filter((item) => /未扣款|没有扣款|不会扣款|扣款未发生/.test(item.normalized));
+  if (charged.length && notCharged.length) addConflict("扣款状态冲突", `${charged[0].type}与${notCharged[0].type}对是否已扣款的描述不一致。`, [charged[0], notCharged[0]]);
+  const broad = records.filter((item) => /全部租户|所有租户|全量用户|全平台/.test(item.normalized));
+  const narrow = records.filter((item) => /单租户|仅.{0,8}租户|只有.{0,8}租户/.test(item.normalized));
+  if (broad.length && narrow.length) addConflict("影响范围冲突", `${broad[0].type}称影响全量对象，但${narrow[0].type}将范围限定为单租户。`, [broad[0], narrow[0]]);
+  const recovered = records.filter((item) => /已恢复|恢复正常|恢复完成/.test(item.normalized));
+  const ongoing = records.filter((item) => /仍失败|仍不可用|仍异常|尚未恢复/.test(item.normalized));
+  if (recovered.length && ongoing.length) addConflict("恢复状态冲突", `${recovered[0].type}称服务已恢复，但${ongoing[0].type}仍观察到异常。`, [recovered[0], ongoing[0]]);
+  const commitments = records.map((item) => ({ ...item, times: [...item.text.matchAll(/(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*UTC)?/gi)].map((match) => match[0].toUpperCase()) })).filter((item) => item.times.length && /承诺|更新|回复|前/.test(item.text));
+  const commitmentTimes = [...new Set(commitments.flatMap((item) => item.times))];
+  if (commitmentTimes.length > 1) addConflict("外部承诺时间不一致", `现场来源中同时出现 ${commitmentTimes.slice(0, 3).join("、")}，需要确认唯一对外更新时间。`, commitments.slice(0, 3));
+  return conflicts;
+}
+
+const unknownChecks = {
+  payment: [["是否已经扣款", /已扣款|未扣款|没有.{0,2}扣款|扣款成功/], ["受影响订单数量", /\d+\s*(笔|个|张).{0,8}(订单|支付)|订单.{0,8}\d+/], ["备用付款路径", /备用.{0,6}(付款|支付).{0,8}(已准备|可用|链接)|备用付款链接|备用支付链接/], ["准确区域范围", /EU|US|APAC|欧洲|美国|亚太|区域/]],
+  security: [["真正阻塞审批的未答项", /未答项|阻塞.{0,8}(采购|审批)|字段级权限/], ["法务允许的对外口径", /法务.{0,12}(口径|要求|确认)/], ["材料最终负责人", /负责人|owner/i], ["答复包发送时间", /(?:[01]?\d|2[0-3]):[0-5]\d|今天|明天/]],
+  sso: [["受影响租户数量", /\d+\s*个?租户|单租户|全部租户|所有租户/], ["元数据或证书状态", /元数据.{0,10}(过期|有效|失效)|metadata.{0,10}(expired|valid|invalid)|证书.{0,10}(过期|有效|失效)|签名.{0,10}(成功|失败)/i], ["staging 验证结果", /staging.{0,12}(成功|失败|通过|未通过|完成)|(成功|失败|通过|未通过|完成).{0,12}staging/i], ["生产切换窗口", /生产.{0,12}(切换|窗口).{0,12}(已确认|已定|确定|(?:[01]?\d|2[0-3]):[0-5]\d)/]],
+  outage: [["受影响区域", /EU|US|APAC|欧洲|美国|亚太|区域/], ["受影响核心路径", /核心路径|请求路径|接口|api/i], ["明确回滚点", /回滚点|回滚到|rollback/i], ["下一次更新时间", /(?:[01]?\d|2[0-3]):[0-5]\d|下一次更新/]],
+  general: [["首个异常时间", /(?:[01]?\d|2[0-3]):[0-5]\d|首次出现/], ["受影响对象", /租户|用户|订单|区域|客户/], ["可验证的恢复路径", /恢复|回滚|绕行|重试|验证/], ["下一次客户更新时间", /下一次更新|承诺|(?:[01]?\d|2[0-3]):[0-5]\d/]],
+};
+
+function refreshAnalysisMetadata(item, profile, hits, combinedText, sourceTypes) {
+  const text = combinedText || `${item.title}\n${item.subtitle}\n${item.sources.map((source) => `${source.type} ${source.text}`).join("\n")}`;
+  const result = profile ? { profile, hits } : localProfileFor(text);
+  const types = sourceTypes || [...new Set(item.sources.map((source) => source.type))];
+  const hasTime = /(?:[01]?\d|2[0-3]):[0-5]\d|今天|明天|小时|分钟/.test(text);
+  const hasScope = /租户|用户|订单|区域|EU|US|APAC|采购|法务/i.test(text);
+  const hasBusinessMoment = /续费|上线|合同|CFO|法务|董事会|采购/i.test(text);
+  const hasTechnicalSignal = /日志|错误|失败|超时|webhook|metadata|签名|证书|权限|500/i.test(text);
+  const evidenceCompleteness = Math.min(100, Math.min(25, item.sources.length * 6) + Math.min(20, types.length * 8) + (hasTime ? 15 : 0) + (hasScope ? 15 : 0) + (hasBusinessMoment ? 15 : 0) + (hasTechnicalSignal ? 10 : 0));
+  const matchStrength = result.hits.length >= 4 && types.length >= 2 ? "强" : result.hits.length >= 2 ? "中" : "弱";
+  item.analysis = {
+    profileId: result.profile.id,
+    profileLabel: result.profile.label,
+    matchStrength,
+    matchedTerms: result.hits,
+    evidenceCompleteness,
+    sourceTypeCount: types.length,
+    conflicts: detectSourceConflicts(item.sources),
+    unknowns: (unknownChecks[result.profile.id] || unknownChecks.general).filter(([, pattern]) => !pattern.test(text)).map(([label]) => label),
+    updatedAt: localTime(new Date()),
+  };
+  return item.analysis;
+}
+
 function applyLocalAnalysis(item, replaceDraftActions = false) {
   const sourceText = item.sources.map((source) => `${source.type} ${source.text}`).join("\n");
   const combinedText = `${item.title}\n${item.subtitle}\n${sourceText}`;
@@ -847,13 +1083,22 @@ function applyLocalAnalysis(item, replaceDraftActions = false) {
     scope.expanded ? "检测到影响范围扩大的新信号" : "未检测到范围扩大的明确信号",
   ];
   item.impact = scope.label;
-  item.confidence = Math.min(94, 58 + Math.min(20, item.sources.length * 4) + Math.min(12, hits.length * 2) + (sourceTypes.length > 1 ? 4 : 0));
+  refreshAnalysisMetadata(item, profile, hits, combinedText, sourceTypes);
   item.subtitle = `本地规则分析命中“${profile.label}”，已更新判断、事实和处置建议。`;
   item.sources.forEach((source) => { source.impact = sourceImpactFor(source.text, profile); });
 
   if (replaceDraftActions) item.actions = item.actions.filter((action) => !String(action.id).startsWith("n"));
   const existing = new Set(item.actions.map((action) => action.text));
-  const added = profile.actions.filter(([text]) => !existing.has(text)).map(([text, owner, due], index) => ({
+  const coveragePatterns = {
+    payment: [/扣款|受影响订单/, /重放|回调|webhook/, /客户.{0,10}(更新|状态)|备用.{0,6}(付款|支付)/],
+    security: [/未答项|字段级权限/, /口径|子处理器|数据保留/, /发送.{0,8}(答复|材料|整包)/],
+    sso: [/租户.{0,8}影响|影响.{0,8}租户/, /staging.{0,12}(验证|导入)|元数据.{0,8}(轮换|导入)/i, /生产.{0,8}(切换|窗口)/],
+    outage: [/事件指挥|指挥频道/, /影响.{0,8}(区域|路径)|区域.{0,8}影响/, /同步.{0,8}(客户|团队)|客户.{0,8}同步/],
+  };
+  const added = profile.actions.filter(([text], index) => {
+    const pattern = coveragePatterns[profile.id]?.[index];
+    return !existing.has(text) && !(pattern && item.actions.some((action) => pattern.test(action.text)));
+  }).map(([text, owner, due], index) => ({
     id: `ai-${profile.id}-${Date.now()}-${index}`,
     text,
     owner: owner === "林岚" || owner === "唐茜" ? item.owner : owner,
@@ -936,6 +1181,114 @@ function openSourceDialog() {
   const timeInput = elements.sourceForm.elements.time;
   timeInput.value = localTime(new Date());
   elements.sourceDialog.showModal();
+}
+
+function resetImportDialog() {
+  elements.importForm.reset();
+  importPreviewSources = [];
+  elements.importFileCount.textContent = "尚未选择文件";
+  elements.importState.hidden = true;
+  elements.importState.className = "import-state";
+  elements.importPreview.hidden = true;
+  elements.importPreview.innerHTML = "";
+  elements.previewImport.hidden = false;
+  elements.previewImport.disabled = true;
+  elements.confirmImport.hidden = true;
+  elements.confirmImport.disabled = true;
+  elements.confirmImport.innerHTML = '<i data-lucide="file-input"></i>确认导入';
+}
+
+function openImportDialog() {
+  resetImportDialog();
+  elements.importDialog.showModal();
+  window.lucide?.createIcons();
+}
+
+function updateImportFileState() {
+  const files = [...elements.importFiles.files];
+  const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+  elements.importFileCount.textContent = files.length ? `${files.length} 个文件 · ${(totalBytes / 1024 / 1024).toFixed(1)} MB` : "尚未选择文件";
+  elements.previewImport.disabled = !files.length;
+  elements.importPreview.hidden = true;
+  elements.confirmImport.hidden = true;
+  elements.previewImport.hidden = false;
+}
+
+function setImportState(message, tone = "") {
+  elements.importState.hidden = false;
+  elements.importState.className = `import-state ${tone}`;
+  elements.importState.textContent = message;
+}
+
+function sourceKey(text) {
+  return String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function updateImportSelection() {
+  const selected = elements.importPreview.querySelectorAll('input[data-import-index]:checked').length;
+  elements.confirmImport.disabled = selected === 0;
+  elements.confirmImport.innerHTML = `<i data-lucide="file-input"></i>确认导入 ${selected} 条`;
+  window.lucide?.createIcons();
+}
+
+function renderImportPreview(payload) {
+  const existing = new Set(currentCase().sources.map((source) => sourceKey(source.text)));
+  importPreviewSources = payload.sources.map((source) => ({ ...source, duplicate: existing.has(sourceKey(source.text)) }));
+  const duplicateCount = importPreviewSources.filter((source) => source.duplicate).length;
+  const failedFiles = payload.files.filter((file) => file.status === "failed");
+  elements.importPreview.hidden = false;
+  elements.importPreview.innerHTML = `
+    <div class="import-summary"><div><strong>${importPreviewSources.length - duplicateCount}</strong><span>可导入</span></div><div><strong>${duplicateCount}</strong><span>案件中重复</span></div><div><strong>${payload.files.length}</strong><span>已处理文件</span></div></div>
+    ${failedFiles.length ? `<div class="import-warnings">${failedFiles.map((file) => `<p><strong>${escapeHtml(file.name)}</strong>${escapeHtml(file.error)}</p>`).join("")}</div>` : ""}
+    ${payload.warnings?.length ? `<div class="import-warnings">${payload.warnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}</div>` : ""}
+    <div class="import-list-head"><span>消息预览</span><small>${importPreviewSources.length} 条解析结果</small></div>
+    <div class="import-list">${importPreviewSources.map((source, index) => `<label class="import-row ${source.duplicate ? "duplicate" : ""}">
+      <input type="checkbox" data-import-index="${index}" ${source.duplicate ? "disabled" : "checked"} />
+      <span><strong>${escapeHtml([source.type, source.channel, source.author].filter(Boolean).join(" · ") || "聊天记录")}</strong><small>${escapeHtml(source.origin)} · ${escapeHtml(source.time)}</small><p>${escapeHtml(source.text)}</p></span>
+      <em>${source.duplicate ? "重复" : "新增"}</em>
+    </label>`).join("") || '<div class="queue-empty">没有解析出可识别的消息</div>'}</div>`;
+  elements.previewImport.hidden = true;
+  elements.confirmImport.hidden = false;
+  updateImportSelection();
+}
+
+async function previewImportedFiles() {
+  elements.previewImport.disabled = true;
+  setImportState("正在解析文件和聊天记录…", "processing");
+  try {
+    const response = await fetch("/api/import/preview", { method: "POST", body: new FormData(elements.importForm) });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "文件解析失败");
+    renderImportPreview(payload);
+    setImportState(`解析完成，共识别 ${payload.recordCount} 条消息。`, "success");
+  } catch (error) {
+    setImportState(error.message || "无法连接导入接口", "error");
+    elements.previewImport.disabled = false;
+  }
+}
+
+function confirmImportedSources() {
+  const selectedIndexes = [...elements.importPreview.querySelectorAll('input[data-import-index]:checked')].map((input) => Number(input.dataset.importIndex));
+  const selected = selectedIndexes.map((index) => importPreviewSources[index]).filter(Boolean);
+  if (!selected.length) return;
+  const item = currentCase();
+  item.sources.push(...selected.map((source) => ({
+    type: source.type,
+    time: source.time === "--:--" ? localTime(new Date()) : source.time,
+    text: source.text,
+    author: source.author,
+    channel: source.channel,
+    origin: source.origin,
+    impact: "批量导入来源已加入判断范围，等待重新分析。",
+  })));
+  item.timeline.unshift({ time: localTime(new Date()), title: "批量导入现场来源", detail: `从聊天与文件导出中加入 ${selected.length} 条来源。` });
+  state.tab = "brief";
+  saveState();
+  elements.importDialog.close();
+  resetImportDialog();
+  render();
+  reanalyze();
+  showToast(`已导入 ${selected.length} 条来源，正在重新分析`);
 }
 
 function exportCurrentCase() {
@@ -1071,7 +1424,7 @@ elements.modulePane.addEventListener("click", (event) => {
       metrics: snapshot.metrics.map(([label, value, unit, delta]) => ({ label, value: `${value}${unit}`, delta })),
       funnel: snapshot.funnel.map(([stage, count, rate]) => ({ stage, count, rate })),
       risks: state.cases.map(({ id, customer, title, risk, owner, status }) => ({ id, customer, title, risk, owner, status: statusLabels[status] })),
-      team: reportOwners,
+      team: snapshot.owners,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const link = document.createElement("a");
@@ -1084,7 +1437,8 @@ elements.modulePane.addEventListener("click", (event) => {
   if (type === "open-retros") switchView("retros");
   if (type === "open-oncall") switchView("oncall");
   if (type === "copy-handoff") {
-    copyText(`当前值班：${platformState.currentShift}（升级负责人）、周启（技术值班）。处理中 ${state.cases.filter((item) => item.status !== "resolved").length} 起。备注：${platformState.handoffNote}`, "交接摘要已复制");
+    const shift = workspaceDb.shifts.find((item) => item.state === "active") || workspaceDb.shifts[0];
+    copyText(`当前值班：${shift.primary}（${shift.primaryRole}）、${shift.specialist}（${shift.specialistRole}）。处理中 ${state.cases.filter((item) => item.status !== "resolved").length} 起。备注：${platformState.handoffNote}`, "交接摘要已复制");
   }
   if (type === "save-handoff") {
     const note = document.getElementById("handoffNote");
@@ -1093,7 +1447,9 @@ elements.modulePane.addEventListener("click", (event) => {
     showToast("交接备注已保存");
   }
   if (type === "take-shift") {
-    platformState.currentShift = platformState.currentShift === "林岚" ? "唐茜" : "林岚";
+    const currentShift = workspaceDb.shifts.find((item) => item.state === "active") || workspaceDb.shifts[0];
+    currentShift.primary = currentShift.primary === "林岚" ? "唐茜" : "林岚";
+    platformState.currentShift = currentShift.primary;
     platformState.handoffNote = `${platformState.currentShift} 已接管当前班次，请在 18:00 前完成交接。`;
     savePlatformState();
     renderModule();
@@ -1203,8 +1559,41 @@ elements.newCaseForm.addEventListener("submit", (event) => {
   const customer = data.get("customer").trim();
   const notes = data.get("notes").trim();
   const owner = data.get("owner");
+  let account = workspaceDb.accounts.find((entry) => entry.name.toLowerCase() === customer.toLowerCase());
+  if (!account) {
+    const accountId = `acct-${Date.now()}`;
+    const contactId = `contact-${Date.now()}`;
+    account = {
+      id: accountId,
+      name: customer,
+      initials: customer.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase(),
+      tier: data.get("priority") === "P1" ? "战略客户" : "重点客户",
+      industry: "待补充",
+      region: "待补充",
+      value: Number(String(data.get("risk")).replace(/[^0-9.]/g, "")) * (String(data.get("risk")).toLowerCase().includes("k") ? 1000 : 1),
+      valueLabel: data.get("risk").trim(),
+      renewalDays: 90,
+      csm: owner,
+      health: data.get("priority") === "P1" ? "critical" : "watch",
+      healthScore: data.get("priority") === "P1" ? 58 : 70,
+      stage: "升级处理中",
+      products: ["待补充"],
+      contactIds: [contactId],
+      signals: [notes.split(/[。！!\n]/)[0]],
+      nextSteps: ["补齐客户档案与影响范围"],
+      activity: [`今天 · 创建升级事件 ESC-${idNumber}`],
+      linkedCaseIds: [`ESC-${idNumber}`],
+    };
+    workspaceDb.accounts.push(account);
+    workspaceDb.contacts.push({ id: contactId, accountId, name: "待补充联系人", role: "客户项目负责人", email: "", phone: "" });
+  }
   const item = {
     id: `ESC-${idNumber}`,
+    accountId: account.id,
+    openedAt: new Date().toISOString(),
+    firstResponseMinutes: 0,
+    category: "商业流程",
+    commitmentMet: true,
     customer,
     title: notes.split(/[。！!\n]/)[0].slice(0, 42) || `${customer} 新升级事件`,
     subtitle: "现场信息已收录，等待本地规则完成首次归因与处置编排。",
@@ -1215,7 +1604,6 @@ elements.newCaseForm.addEventListener("submit", (event) => {
     impact: "待确认",
     deadline: Date.now() + 60 * minute,
     slaTotal: 60 * minute,
-    confidence: 61,
     diagnosis: "首次分析正在核对现场描述中的时间线、影响范围和外部承诺。当前建议先确认受影响对象，再安排单一工程负责人复现。",
     facts: ["客户已明确提出升级诉求。", "商业风险已记录并进入跟踪。", "原始现场信息已保留，可继续补充来源。"],
     reply: `${customer} 团队，你们好。我们已将该问题升级并安排专人处理，目前正在确认影响范围与恢复路径。我们会在一小时内提供下一次明确更新。`,
@@ -1232,6 +1620,7 @@ elements.newCaseForm.addEventListener("submit", (event) => {
     sources: [{ type: "现场描述", time: localTime(new Date()), text: notes, impact: "待首次分析确认。" }],
     timeline: [{ time: localTime(new Date()), title: "升级事件已创建", detail: `${owner} 接管，本地规则开始首次分析。` }],
   };
+  refreshAnalysisMetadata(item);
   state.cases.unshift(item);
   state.selectedId = item.id;
   state.filter = "all";
@@ -1279,6 +1668,32 @@ elements.sourceForm.addEventListener("submit", (event) => {
   reanalyze();
 });
 
+elements.importFiles.addEventListener("change", updateImportFileState);
+elements.importForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  previewImportedFiles();
+});
+elements.importPreview.addEventListener("change", (event) => {
+  if (event.target.matches("[data-import-index]")) updateImportSelection();
+});
+elements.confirmImport.addEventListener("click", confirmImportedSources);
+document.getElementById("cancelImport").addEventListener("click", () => elements.importDialog.close());
+document.getElementById("closeImportDialog").addEventListener("click", () => elements.importDialog.close());
+["dragenter", "dragover"].forEach((type) => elements.importDropzone.addEventListener(type, (event) => {
+  event.preventDefault();
+  elements.importDropzone.classList.add("dragging");
+}));
+["dragleave", "drop"].forEach((type) => elements.importDropzone.addEventListener(type, (event) => {
+  event.preventDefault();
+  elements.importDropzone.classList.remove("dragging");
+}));
+elements.importDropzone.addEventListener("drop", (event) => {
+  const transfer = new DataTransfer();
+  [...event.dataTransfer.files].forEach((file) => transfer.items.add(file));
+  elements.importFiles.files = transfer.files;
+  updateImportFileState();
+});
+
 elements.playbookCaseSelect.addEventListener("change", renderPlaybookRunPreview);
 
 elements.runPlaybookForm.addEventListener("submit", (event) => {
@@ -1304,10 +1719,8 @@ elements.runPlaybookForm.addEventListener("submit", (event) => {
   target.actions.push(...added);
   target.timeline.unshift({ time: localTime(new Date()), title: "已套用处置手册", detail: `${playbook.title} · 新增 ${added.length} 个动作，跳过 ${playbook.steps.length - added.length} 个重复动作。` });
   playbook.runs += 1;
-  platformState.playbookRuns[playbook.id] = playbook.runs;
   state.selectedId = target.id;
   saveState();
-  savePlatformState();
   state.tab = "brief";
   elements.runPlaybookDialog.close();
   switchView("escalations");
@@ -1327,6 +1740,7 @@ elements.playbookForm.addEventListener("submit", (event) => {
   const steps = data.get("steps").split("\n").map((step) => step.trim()).filter(Boolean);
   const item = {
     id: `custom-${Date.now()}`,
+    builtIn: false,
     icon: "list-checks",
     title,
     desc: data.get("description").trim(),
@@ -1334,8 +1748,7 @@ elements.playbookForm.addEventListener("submit", (event) => {
     updated: "刚刚",
     steps,
   };
-  platformState.customPlaybooks.push(item);
-  playbooks.push(item);
+  workspaceDb.playbooks.push(item);
   savePlatformState();
   elements.playbookDialog.close();
   elements.playbookForm.reset();
@@ -1382,11 +1795,16 @@ document.addEventListener("keydown", (event) => {
     setContextDrawer(false);
     if (elements.newCaseDialog.open) elements.newCaseDialog.close();
     if (elements.sourceDialog.open) elements.sourceDialog.close();
+    if (elements.importDialog.open) elements.importDialog.close();
     if (elements.playbookDialog.open) elements.playbookDialog.close();
     if (elements.runPlaybookDialog.open) elements.runPlaybookDialog.close();
     if (elements.retroDialog.open) elements.retroDialog.close();
   }
 });
+
+const missingAnalysis = state.cases.filter((item) => !item.analysis);
+missingAnalysis.forEach((item) => refreshAnalysisMetadata(item));
+if (missingAnalysis.length) workspaceRepository.save();
 
 setInterval(updateClock, 1000);
 render();

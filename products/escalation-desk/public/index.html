@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#f6f7f9" />
     <title>Relay</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="styles.css?v=20260824-3" />
+    <link rel="stylesheet" href="styles.css?v=20260825-1" />
   </head>
   <body>
     <div class="app" id="app">
@@ -73,10 +73,10 @@
           </div>
 
           <div class="overview-stats">
-            <article><span>处理中</span><strong id="activeCount">0</strong><small>较昨日 <b class="up">+2</b></small></article>
-            <article><span>临近承诺</span><strong>2</strong><small>未来 60 分钟</small></article>
-            <article><span>首次响应</span><strong>18<span>m</span></strong><small>目标 30 分钟</small></article>
-            <article><span>SLA 达标</span><strong>94<span>%</span></strong><small>本月 76 起事件</small></article>
+            <article><span>处理中</span><strong id="activeCount">0</strong><small>来自统一工作区</small></article>
+            <article><span>临近承诺</span><strong id="nearCommitmentCount">0</strong><small>未来 60 分钟</small></article>
+            <article><span>首次响应</span><strong><b id="queueMedianResponse">0</b><span>m</span></strong><small>近 30 天中位数</small></article>
+            <article><span>SLA 达标</span><strong><b id="queueSlaRate">0</b><span>%</span></strong><small>近 30 天事件</small></article>
           </div>
 
           <div class="list-toolbar">
@@ -94,7 +94,7 @@
           <div class="case-list" id="caseList"></div>
 
           <footer class="overview-foot">
-            <span><i data-lucide="circle-check"></i><b id="todayResolved">7</b> 起事件今日关闭</span>
+            <span><i data-lucide="circle-check"></i><b id="todayResolved">0</b> 起事件近 7 天解决</span>
             <span>数据更新于刚刚</span>
           </footer>
         </section>
@@ -157,48 +157,64 @@
 
     <dialog id="newCaseDialog" class="dialog">
       <form id="newCaseForm" method="dialog">
-        <div class="dialog-head"><div><span class="dialog-kicker">New escalation</span><h2>新建升级事件</h2><p>粘贴现场信息，先建立负责人和客户更新时间。</p></div><button class="header-icon" value="cancel" formmethod="dialog" type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="dialog-head"><div><span class="dialog-kicker">New escalation</span><h2>新建升级事件</h2><p>粘贴现场信息，先建立负责人和客户更新时间。</p></div><button class="header-icon" value="cancel" formmethod="dialog" formnovalidate type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
         <div class="form-grid"><label><span>客户名称</span><input name="customer" required placeholder="例如：Northstar Bio" /></label><label><span>商业风险</span><input name="risk" required placeholder="例如：¥860k 续费" /></label><label class="full-field"><span>发生了什么</span><textarea name="notes" required rows="7" placeholder="粘贴工单、群聊、电话纪要或日志"></textarea></label><label><span>优先级</span><select name="priority"><option>P1</option><option selected>P2</option><option>P3</option></select></label><label><span>负责人</span><select name="owner"><option>林岚</option><option>周启</option><option>唐茜</option></select></label></div>
-        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" type="submit">取消</button><button class="button solid" type="submit">创建并分析</button></div>
+        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" formnovalidate type="submit">取消</button><button class="button solid" type="submit">创建并分析</button></div>
       </form>
     </dialog>
 
     <dialog id="sourceDialog" class="dialog compact-dialog">
       <form id="sourceForm" method="dialog">
-        <div class="dialog-head"><div><span class="dialog-kicker">New source</span><h2>添加现场来源</h2><p>保留原始内容，重新校验当前判断。</p></div><button class="header-icon" value="cancel" formmethod="dialog" type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="dialog-head"><div><span class="dialog-kicker">New source</span><h2>添加现场来源</h2><p>保留原始内容，重新校验当前判断。</p></div><button class="header-icon" value="cancel" formmethod="dialog" formnovalidate type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
         <div class="form-grid"><label><span>来源</span><select name="type"><option>客户邮件</option><option>工单</option><option>Slack</option><option>日志</option><option>会议记录</option></select></label><label><span>时间</span><input name="time" type="time" required /></label><label class="full-field"><span>内容</span><textarea name="text" rows="5" required placeholder="粘贴原始内容"></textarea></label></div>
-        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" type="submit">取消</button><button class="button solid" type="submit">添加并重新分析</button></div>
+        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" formnovalidate type="submit">取消</button><button class="button solid" type="submit">添加并重新分析</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="importDialog" class="dialog import-dialog">
+      <form id="importForm">
+        <div class="dialog-head"><div><span class="dialog-kicker">Batch import</span><h2>导入聊天与现场文件</h2><p>解析后先预览，确认时才会写入当前案件。</p></div><button class="header-icon" id="closeImportDialog" type="button" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <label class="import-dropzone" id="importDropzone" for="importFiles">
+          <input id="importFiles" name="files" type="file" accept=".txt,.log,.md,.csv,.json,.zip" multiple />
+          <i data-lucide="files"></i>
+          <span><strong>选择文件或拖到这里</strong><small>支持 TXT、LOG、CSV、JSON 和 Slack ZIP，一次最多 20 个文件</small></span>
+          <b id="importFileCount">尚未选择文件</b>
+        </label>
+        <div class="import-state" id="importState" hidden></div>
+        <div class="import-preview" id="importPreview" hidden></div>
+        <div class="dialog-actions"><button class="button quiet" id="cancelImport" type="button">取消</button><button class="button solid" id="previewImport" type="submit" disabled><i data-lucide="scan-search"></i>解析并预览</button><button class="button solid" id="confirmImport" type="button" hidden disabled><i data-lucide="file-input"></i>确认导入</button></div>
       </form>
     </dialog>
 
     <dialog id="playbookDialog" class="dialog compact-dialog">
       <form id="playbookForm" method="dialog">
-        <div class="dialog-head"><div><span class="dialog-kicker">New playbook</span><h2>新建处置手册</h2><p>把团队反复使用的动作整理成可复用流程。</p></div><button class="header-icon" value="cancel" formmethod="dialog" type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="dialog-head"><div><span class="dialog-kicker">New playbook</span><h2>新建处置手册</h2><p>把团队反复使用的动作整理成可复用流程。</p></div><button class="header-icon" value="cancel" formmethod="dialog" formnovalidate type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
         <div class="form-grid"><label class="full-field"><span>手册名称</span><input name="title" required placeholder="例如：数据导出阻塞" /></label><label class="full-field"><span>适用场景</span><input name="description" required placeholder="例如：批量导出超时、队列拥堵与客户上线风险" /></label><label class="full-field"><span>处置步骤</span><textarea name="steps" required rows="6" placeholder="每行一个步骤"></textarea></label></div>
-        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" type="submit">取消</button><button class="button solid" type="submit">保存手册</button></div>
+        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" formnovalidate type="submit">取消</button><button class="button solid" type="submit">保存手册</button></div>
       </form>
     </dialog>
 
     <dialog id="runPlaybookDialog" class="dialog compact-dialog">
       <form id="runPlaybookForm" method="dialog">
         <input type="hidden" name="playbookId" />
-        <div class="dialog-head"><div><span class="dialog-kicker">Run playbook</span><h2>套用处置手册</h2><p>选择目标事件，确认新增动作后再执行。</p></div><button class="header-icon" value="cancel" formmethod="dialog" type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="dialog-head"><div><span class="dialog-kicker">Run playbook</span><h2>套用处置手册</h2><p>选择目标事件，确认新增动作后再执行。</p></div><button class="header-icon" value="cancel" formmethod="dialog" formnovalidate type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
         <div class="form-grid"><label class="full-field"><span>目标升级事件</span><select name="caseId" id="playbookCaseSelect"></select></label></div>
         <div class="playbook-run-preview" id="playbookRunPreview"></div>
-        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" type="submit">取消</button><button class="button solid" type="submit">确认加入案件</button></div>
+        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" formnovalidate type="submit">取消</button><button class="button solid" type="submit">确认加入案件</button></div>
       </form>
     </dialog>
 
     <dialog id="retroDialog" class="dialog compact-dialog">
       <form id="retroForm" method="dialog">
-        <div class="dialog-head"><div><span class="dialog-kicker">New review</span><h2>发起复盘</h2><p>把一次升级转成改进项，留给下一班人。</p></div><button class="header-icon" value="cancel" formmethod="dialog" type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="dialog-head"><div><span class="dialog-kicker">New review</span><h2>发起复盘</h2><p>把一次升级转成改进项，留给下一班人。</p></div><button class="header-icon" value="cancel" formmethod="dialog" formnovalidate type="submit" aria-label="关闭"><i data-lucide="x"></i></button></div>
         <div class="form-grid"><label><span>关联事件</span><select name="caseId" id="retroCaseSelect"></select></label><label><span>负责人</span><select name="owner"><option>林岚</option><option>周启</option><option>唐茜</option><option>韩舟</option></select></label><label class="full-field"><span>复盘主题</span><input name="title" required placeholder="例如：为什么这次事件没有提前预警" /></label><label class="full-field"><span>第一项改进动作</span><input name="action" required placeholder="例如：为 webhook 重试耗尽增加告警" /></label></div>
-        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" type="submit">取消</button><button class="button solid" type="submit">创建复盘</button></div>
+        <div class="dialog-actions"><button class="button quiet" value="cancel" formmethod="dialog" formnovalidate type="submit">取消</button><button class="button solid" type="submit">创建复盘</button></div>
       </form>
     </dialog>
 
     <div class="toast" id="toast" role="status"></div>
     <script src="lucide.min.js?v=20260821-4"></script>
-    <script src="app.js?v=20260824-3"></script>
+    <script src="workspace-store.js?v=20260825-1"></script>
+    <script src="app.js?v=20260825-1"></script>
   </body>
 </html>
