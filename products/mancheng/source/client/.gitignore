@@ -1,5 +1,0 @@
-# Playwright E2E (FE7)
-e2e/.tmp/
-test-results/
-playwright-report/
-playwright/.cache/

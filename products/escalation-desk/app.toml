@@ -1,3 +1,0 @@
-name   = "Relay"
-start  = "python3 server.py"
-health = "/"

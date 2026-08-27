@@ -1,3 +1,0 @@
-name = "CFOP 立体教室"
-start = "node server.js"
-health = "/"
