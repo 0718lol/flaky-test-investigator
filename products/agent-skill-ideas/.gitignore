@@ -1,1 +1,4 @@
 .asteam-product.log
+.venv/
+data/
+__pycache__/

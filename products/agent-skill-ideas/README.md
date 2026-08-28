@@ -1,76 +1,69 @@
 # Flaky Test Investigator
 
-Flaky Test Investigator 是一个面向 CI / QA / 开发团队的偶发失败调查工作台。它把“偶尔红一次”变成可重复的实验：记录运行上下文，扰动可疑变量，比较通过与失败样本，最后输出最小复现命令和下一步建议。
+Flaky Test Investigator 是一个本地可运行的 flaky 调查工作台。它不是单纯的前端演示，而是一个带后端、持久化和真实子进程 runner 的小型工程产品。
 
-## 产品目标
+## 能做什么
 
-- 在 2-3 个实验变量内缩小 flaky 的复现范围
-- 保留每次运行的顺序、seed、并发度、环境和堆栈证据
-- 让调查结果可以交接、回归和接入 PR / CI
+- 创建和管理多个 flaky 调查
+- 用受控命令执行多轮复现
+- 按并发度使用受控 worker pool 真正并行启动独立子进程
+- 记录 seed、并发度、顺序扰动、工作目录和环境快照
+- 规范化失败日志并生成稳定的 failure fingerprint
+- 用 Wilson 95% 区间辅助解释嫌疑变量，避免小样本误判
+- 导出运行记录和 Markdown 报告
+- 把调查数据写进本地 JSON 文件，便于持续迭代
 
-## 快速开始
+## 启动
 
-产品由 ASteam 托管，目录内的 `app.toml` 会自动读取 `$PORT` 并绑定 `0.0.0.0`。打开产品后：
+产品由 ASteam 托管。`app.toml` 会启动 `python3 app.py`，程序会读取 `$PORT` 并绑定到 `0.0.0.0`。
 
-1. 在左侧选择调查案例，或点击“新建调查”。
-2. 在“调查概览”中确认测试命令、重复次数、并发度和随机种子。
-3. 打开“顺序扰动”和“环境快照”，点击“开始复现”。
-4. 查看复现矩阵，比较失败样本的顺序、seed、并发和环境。
-5. 根据“嫌疑变量排行”选择下一轮最小实验。
-6. 在调查笔记记录假设，完成后到“报告”复制或下载 Markdown。
+产品目录包含 `requirements-test.txt`。平台初始化脚本会在 `.venv` 中安装 pytest，runner 会自动将该环境加入测试进程的 `PATH`。
 
-当前浏览器版本使用本地模拟 runner 来验证完整交互闭环；调查笔记写入 localStorage，运行数据可以导出 JSON。
+## 默认示例
 
-## 页面说明
+首次打开会有一个示例调查：
 
-### 调查概览
+- 命令：`python3 examples/flaky_case.py`
+- 工作目录：`/workspace/products/agent-skill-ideas`
 
-- 复现率：失败次数 / 总运行次数
-- 失败信号：按堆栈归并的异常模式
-- 复现矩阵：每个样本的变量组合和结果
-- 嫌疑变量：按相关性排序，并给出证据摘要
-- 环境快照：Python、pytest、时区、CPU 等复现上下文
-- 调查笔记：记录假设、排除项和下一步
+这个示例会根据 `FTI_SEED`、`FTI_CONCURRENCY`、`FTI_ORDER` 模拟一个不稳定失败，适合验证调查闭环。
 
-### 运行记录
+## API
 
-按时间查看所有运行，可导出为 JSON 交给 CI、Issue 或数据分析脚本。
+- `GET /api/state`
+- `POST /api/investigations`
+- `PATCH /api/investigations/:id`
+- `POST /api/investigations/:id/runs`
+- `GET /api/jobs/:id`
+- `POST /api/jobs/:id/cancel`
+- `GET /api/investigations/:id/report`
+- `POST /api/investigations/:id/pollution-bisect`
 
-### 报告与证据
+## 运行约束
 
-生成包含结论、嫌疑变量、最小复现命令和下一步的 Markdown 报告，适合贴到 PR 或事故复盘。
+runner 只允许这些命令入口：
 
-## 建议的调查方法
+- `pytest`
+- `python` / `python3`
+- `npm`
+- `npx`
+- `yarn`
+- `pnpm`
+- `go`
 
-先跑一组 baseline，再一次只改变一个变量。常见顺序是：
+命令只能在 `/workspace` 下的目录执行，默认会截断输出并设置超时，避免误伤环境。
 
-1. 固定 seed，比较并发度 1 / 2 / 4。
-2. 固定并发度，打开和关闭顺序扰动。
-3. 固定以上变量，比较冷缓存 / 热缓存和时区。
-4. 将最稳定复现的组合缩减成最小命令，再回到代码检查共享 fixture、全局状态和外部依赖。
+每个样本都是独立子进程。`concurrency` 控制同时运行的 worker 数（上限 16），不会把测试代码加载进服务进程；job API 会返回 `workers`、完整 `config` 和 `completion_order`，方便审计实验是否按预期执行。
 
-不要把“重复跑 100 次”当作结论。重复只能证明现象，变量对照才有助于定位原因。
+运行中的 job 可以调用取消接口。runner 会终止对应的进程组，并将 job 标记为 `cancelled`，已完成的样本仍会保留。
 
-## 接入真实 runner
+污染测试二分接口接收 `target`、`candidates`（测试 nodeid 数组）和可选的 `command`、`cwd`、`seed`。它会反复执行候选集合与目标测试，缩小最可能污染目标的前置测试，并返回每轮检查的输出证据。
 
-前端的实验配置和展示区域已拆开，可将 `app.js` 中的 `startRun` 替换为后端任务：
+## 迭代建议
 
-- `POST /api/investigations/:id/runs`：提交 `repeats`、`concurrency`、`seed`、`orderPerturbation`、`captureEnvironment`
-- `GET /api/runs/:id/events`：用 SSE 推送进度、样本、失败堆栈和环境快照
-- `GET /api/investigations/:id/report`：返回复现率、变量相关性和最小复现命令
-- `POST /api/investigations/:id/snapshots`：保存依赖锁、环境变量白名单和 git SHA
+下一步最有价值的升级是：
 
-建议 runner 输出统一事件格式：
-
-```json
-{"type":"sample","run":18,"status":"failed","seed":42,"order":["auth","capture","refund"],"concurrency":4,"duration_ms":2840}
-```
-
-## 后续迭代
-
-- 接入 pytest / Jest / Go test 的真实执行器
-- 支持 CI 日志拖拽解析和失败堆栈归并
-- 增加变量单因素实验和二分搜索
-- 保存失败样本仓库，检测老 flaky 在新 PR 中复发
-- GitHub App：自动评论复现矩阵、最小命令和风险变化
-
+1. 接入 pytest / Jest / Go test 的更细粒度事件流
+2. 保存失败样本仓库，做历史 flaky 复发识别
+3. 增加变量单因素实验和自动最小化命令
+4. 把报告同步到 GitHub PR 评论

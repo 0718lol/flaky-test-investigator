@@ -1,21 +1,423 @@
 'use strict';
-const cases=[{id:'checkout',title:'checkout race',repo:'payments-api',framework:'pytest',meta:'最近一次失败 12 分钟前',command:'pytest tests/test_checkout.py::test_parallel_capture -q',runs:18,fail:7},{id:'cache',title:'cache invalidation',repo:'catalog-service',framework:'Jest',meta:'最近一次失败 2 小时前',command:'npm test -- cache/invalidation.spec.ts',runs:42,fail:9},{id:'timezone',title:'timezone boundary',repo:'billing-worker',framework:'Go test',meta:'最近一次失败 昨天',command:'go test ./internal/billing -run TestMonthEnd',runs:31,fail:4}];
-let activeCase=0, view='lab', matrixShown=6, running=false;
-const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-const runData=[
- ['#018','auth → capture → refund','42','4','UTC','失败','2.84s'],['#017','auth → refund → capture','42','4','UTC','通过','2.61s'],['#016','capture → auth → refund','17','4','UTC','失败','2.79s'],['#015','auth → capture → refund','08','1','UTC','通过','1.42s'],['#014','refund → capture → auth','42','8','UTC','失败','3.05s'],['#013','auth → capture → refund','31','4','UTC','通过','2.68s'],['#012','capture → refund → auth','42','4','UTC','失败','2.81s'],['#011','auth → capture → refund','09','1','UTC','通过','1.39s'],['#010','auth → refund → capture','42','8','UTC','失败','3.11s'],['#009','capture → auth → refund','77','4','UTC','通过','2.73s'],['#008','auth → capture → refund','42','4','UTC','失败','2.88s'],['#007','refund → auth → capture','13','4','UTC','通过','2.55s']];
-const suspects=[['并发度 = 4+','0.91','并发 worker 共享 capture fixture'],['seed = 42','0.78','7/9 失败样本使用固定 seed'],['顺序：capture → refund','0.64','失败集中在相邻状态转换'],['缓存状态','0.31','冷启动时未复现']];
-function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(toast.t);toast.t=setTimeout(()=>t.classList.remove('show'),1800)}
-function renderCases(){ $('#caseCount').textContent=cases.length;$('#caseList').innerHTML=cases.map((c,i)=>`<button class="case-item ${i===activeCase?'active':''}" data-case="${i}"><i class="case-dot"></i><div><b>${c.title}</b><small>${c.repo} · ${c.framework}</small></div></button>`).join('') }
-function current(){return cases[activeCase]}
-function renderMatrix(){const rows=runData.slice(0,matrixShown);$('#matrixBody').innerHTML=rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td><td>${r[4]}</td><td><span class="result ${r[5]==='失败'?'fail':'pass'}">${r[5]}</span></td><td>${r[6]}</td></tr>`).join('');$('#loadMoreBtn').textContent=matrixShown>=runData.length?'已展示全部运行':'加载全部 ${current().runs} 次运行 →'}
-function renderSuspects(){$('#suspects').innerHTML=suspects.map(s=>`<div class="suspect"><div class="suspect-head"><b>${s[0]}</b><span>${s[1]}</span></div><div class="bar"><i style="width:${Number(s[1])*100}%"></i></div><small style="display:block;color:#98a4b3;font-size:10px;margin-top:5px">${s[2]}</small></div>`).join('')}
-function renderRuns(){$('#runList').innerHTML='<div class="run-row header"><span>RUN</span><span>配置</span><span>结果</span><span>耗时</span><span>时间</span></div>'+runData.concat(runData.slice(0,6)).map((r,i)=>`<div class="run-row"><span>${r[0]}</span><span>${r[1]} · c=${r[3]}</span><span class="${r[5]==='失败'?'fail':'pass'}">${r[5]}</span><span>${r[6]}</span><span>${i<3?'刚刚':(i+1)+' 分钟前'}</span></div>`).join('')}
-function reportMarkdown(){const c=current();return `# ${c.title} / 复现报告\n\n## 结论\n在 ${c.runs} 次运行中复现 ${c.fail} 次（${(c.fail/c.runs*100).toFixed(1)}%）。最可能原因是并发 worker 共享 fixture，seed=42 与特定执行顺序会放大问题。\n\n## 嫌疑变量\n1. 并发度 = 4+（相关性 0.91）\n2. seed = 42（相关性 0.78）\n3. capture → refund 顺序（相关性 0.64）\n\n## 最小复现\n\`pytest tests/test_checkout.py::test_parallel_capture -q -n 4 --randomly-seed=42\`\n\n## 下一步\n固定 seed=42，关闭顺序扰动，依次扫描并发度 1/2/4；检查 capture fixture 的生命周期与共享状态。\n`}
-function renderReport(){$('#reportTitle').textContent=current().title+' / 复现报告';$('#reportBody').innerHTML='<h3>结论</h3><p>在 <b>'+current().runs+' 次</b>运行中复现 <b>'+current().fail+' 次</b>（'+(current().fail/current().runs*100).toFixed(1)+'%）。最可能原因是并发 worker 共享 fixture，seed=42 与特定执行顺序会放大问题。</p><h3>嫌疑变量</h3><ol><li>并发度 = 4+（相关性 0.91）</li><li>seed = 42（相关性 0.78）</li><li>capture → refund 顺序（相关性 0.64）</li></ol><h3>最小复现命令</h3><pre>pytest tests/test_checkout.py::test_parallel_capture -q -n 4 --randomly-seed=42</pre><h3>下一步</h3><p>固定 seed=42，关闭顺序扰动，依次扫描并发度 1/2/4；检查 capture fixture 的生命周期与共享状态。</p>'}
-function render(){const c=current();$('#crumbTitle').textContent=c.title;$('#caseTitle').textContent=c.title;$('#caseMeta').textContent=c.repo+' · '+c.framework+' · '+c.meta;$('#commandText').textContent=c.command;$('#totalRuns').textContent=c.runs;$('#runCount').textContent=c.runs;$('#failRuns').textContent=c.fail;$('#reproRate').textContent=(c.fail/c.runs*100).toFixed(1)+'%';renderCases();renderMatrix();renderSuspects();renderRuns();renderReport()}
-function setView(v){view=v;$$('[data-view]').forEach(x=>x.classList.toggle('active',x.dataset.view===v));$('#labView').classList.toggle('hidden',v!=='lab');$('#runsView').classList.toggle('hidden',v!=='runs');$('#reportsView').classList.toggle('hidden',v!=='reports')}
-function startRun(){if(running)return;running=true;const n=Math.max(2,Math.min(100,Number($('#repeatInput').value)||24));$('#runProgress').classList.remove('hidden');$('#startRunBtn').disabled=true;let i=0;const timer=setInterval(()=>{i++;$('#progressText').textContent=i+' / '+n;$('#progressBar').style.width=(i/n*100)+'%';if(i>=n){clearInterval(timer);running=false;$('#startRunBtn').disabled=false;$('#runProgress').classList.add('hidden');const fail=Math.max(1,Math.round(n*.35+Math.random()*n*.12));current().runs+=n;current().fail+=fail;matrixShown=6;render();toast('实验完成：'+fail+' 次失败，已更新嫌疑变量')}} ,70)}
-function download(name,text,type='text/plain'){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),500)}
-function bind(){document.body.addEventListener('click',e=>{const c=e.target.closest('[data-case]');if(c){activeCase=Number(c.dataset.case);matrixShown=6;render();return}const v=e.target.closest('[data-view]');if(v)setView(v.dataset.view)});$('#runBtn').onclick=()=>{setView('lab');startRun()};$('#startRunBtn').onclick=startRun;$('#loadMoreBtn').onclick=()=>{matrixShown=runData.length;renderMatrix()};$('#snapshotBtn').onclick=()=>toast('环境快照已保存到本地');$('#saveNoteBtn').onclick=()=>{localStorage.ftiNote=$('#notes').value;toast('调查笔记已保存')};$('#copyReportBtn').onclick=()=>navigator.clipboard?.writeText(reportMarkdown()).then(()=>toast('报告已复制'));$('#downloadReportBtn').onclick=()=>download(current().title+'-report.md',reportMarkdown());$('#exportRunsBtn').onclick=()=>download(current().title+'-runs.json',JSON.stringify({case:current(),runs:runData},null,2),'application/json');$('#newCaseBtn').onclick=$('#addCaseBtn').onclick=()=>{const title=prompt('调查名称','new flaky case');if(title){cases.push({id:Date.now(),title,repo:'new-repository',framework:'pytest',meta:'刚刚创建',command:'pytest tests/test_target.py -q',runs:0,fail:0});activeCase=cases.length-1;render();toast('已创建调查')}};$('#importBtn').onclick=()=>$('#fileInput').click();$('#fileInput').onchange=e=>{const f=e.target.files[0];if(f){toast('已导入 '+f.name+'，可在实验室中继续配置')}};$('#editCommand').onclick=()=>{const n=prompt('编辑测试命令',$('#commandText').textContent);if(n){current().command=n;render()}};$('#pasteLogBtn').onclick=()=>toast('请将日志文件拖入导入案例，或粘贴到调查笔记');$('#expandEnvBtn').onclick=()=>toast('环境快照包含依赖锁、系统变量与 git SHA')};render();bind();if(localStorage.ftiNote)$('#notes').value=localStorage.ftiNote;
 
+const api = {
+  state: () => fetch('/api/state').then(r => r.json()),
+  createInvestigation: payload => fetch('/api/investigations', {
+    method: 'POST',
+    headers: {'content-type': 'application/json'},
+    body: JSON.stringify(payload),
+  }).then(r => r.json()),
+  updateInvestigation: (id, payload) => fetch(`/api/investigations/${id}`, {
+    method: 'PATCH',
+    headers: {'content-type': 'application/json'},
+    body: JSON.stringify(payload),
+  }).then(r => r.json()),
+  runInvestigation: (id, payload) => fetch(`/api/investigations/${id}/runs`, {
+    method: 'POST',
+    headers: {'content-type': 'application/json'},
+    body: JSON.stringify(payload),
+  }).then(r => r.json()),
+  job: id => fetch(`/api/jobs/${id}`).then(r => r.json()),
+  cancelJob: id => fetch(`/api/jobs/${id}/cancel`, {method: 'POST'}).then(r => r.json()),
+  report: id => fetch(`/api/investigations/${id}/report`).then(r => r.json()),
+};
+
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+const fmtPct = n => `${(n * 100).toFixed(1)}%`;
+
+const state = {
+  investigations: [],
+  runs: [],
+  selectedId: null,
+  view: 'lab',
+  job: null,
+  loading: false,
+  report: '',
+};
+
+function toast(message) {
+  const el = $('#toast');
+  el.textContent = message;
+  el.classList.add('show');
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => el.classList.remove('show'), 1800);
+}
+
+function selectedInvestigation() {
+  return state.investigations.find(item => item.id === state.selectedId) || state.investigations[0] || null;
+}
+
+function runsFor(inv) {
+  return state.runs.filter(run => run.investigation_id === inv.id);
+}
+
+function updateControls(inv) {
+  if (!inv) return;
+  $('#commandText').textContent = inv.command || 'pytest -q';
+  $('#notes').value = inv.notes || '';
+  $('#cwdInput').value = inv.cwd || '';
+  $('#caseTitle').textContent = inv.title;
+  $('#crumbTitle').textContent = inv.title;
+  $('#caseMeta').textContent = `${inv.repo} · ${inv.framework} · ${runsFor(inv).length} 次运行`;
+}
+
+function renderCases() {
+  $('#caseCount').textContent = state.investigations.length;
+  $('#caseList').innerHTML = state.investigations.map(inv => {
+    const active = inv.id === state.selectedId ? 'active' : '';
+    return `<button class="case-item ${active}" data-case="${inv.id}">
+      <i class="case-dot"></i>
+      <div><b>${inv.title}</b><small>${inv.repo} · ${inv.framework}</small></div>
+    </button>`;
+  }).join('');
+}
+
+function renderSignals(inv) {
+  const runs = runsFor(inv);
+  const failedRuns = runs.filter(r => r.status === 'failed');
+  const signals = (inv.signals || []).slice(0, 2).map(item => [item.signal, item.count]);
+  if (!signals.length) signals.push(['暂无失败信号', 0]);
+  const latestFailure = failedRuns[0];
+  $('#sampleLog').textContent = latestFailure
+    ? [latestFailure.started_at, latestFailure.stderr || latestFailure.stdout || latestFailure.signal || ''].filter(Boolean).join('\n')
+    : '等待后端运行样本…';
+  $('#signalList').innerHTML = signals.map(([signal, count], index) => {
+    const icon = index === 0 ? '!' : '◷';
+    const tone = index === 0 ? 'red' : 'amber';
+    return `<div class="signal">
+      <div class="signal-icon ${tone}">${icon}</div>
+      <div><b>${signal}</b><small>按失败指纹聚合 · ${count} 个样本</small></div>
+      <span class="signal-count">×${count}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderMatrix(inv) {
+  const runs = runsFor(inv).slice().reverse().slice(0, 12);
+  $('#matrixBody').innerHTML = runs.map(run => `
+    <tr>
+      <td>${run.id.slice(0, 8)}</td>
+      <td>${run.order}</td>
+      <td>${run.seed}</td>
+      <td>${run.concurrency}</td>
+      <td>${run.env?.timezone || 'UTC'}</td>
+      <td><span class="result ${run.status === 'failed' ? 'fail' : 'pass'}">${run.status === 'failed' ? '失败' : '通过'}</span></td>
+      <td>${(run.duration_ms / 1000).toFixed(2)}s</td>
+    </tr>
+  `).join('') || '<tr><td colspan="7">暂无运行</td></tr>';
+  $('#loadMoreBtn').textContent = runsFor(inv).length > runs.length ? `查看全部 ${runsFor(inv).length} 次运行` : '暂无更多运行';
+}
+
+function renderSuspects(inv) {
+  const suspects = inv.suspects || [];
+  $('#suspects').innerHTML = suspects.length ? suspects.map(item => `
+    <div class="suspect">
+      <div class="suspect-head"><b>${item.name}</b><span>${item.score.toFixed(2)}</span></div>
+      <div class="bar"><i style="width:${Math.max(8, item.score * 100)}%"></i></div>
+      <small>${item.evidence}${item.confidence ? ` · 95% 区间 ${(item.confidence[0] * 100).toFixed(0)}–${(item.confidence[1] * 100).toFixed(0)}%` : ''}</small>
+    </div>
+  `).join('') : '<div class="empty-state">需要更多失败样本来排序嫌疑变量。</div>';
+}
+
+function renderRuns(inv) {
+  const runs = runsFor(inv).slice().reverse();
+  $('#runList').innerHTML = `
+    <div class="run-row header"><span>RUN</span><span>配置</span><span>结果</span><span>耗时</span><span>时间</span></div>
+    ${runs.map(run => `
+      <div class="run-row clickable" data-run="${run.id}" tabindex="0">
+        <span>${run.id.slice(0, 8)}</span>
+        <span>${run.order} · c=${run.concurrency} · seed=${run.seed}</span>
+        <span class="${run.status === 'failed' ? 'fail' : 'pass'}">${run.status === 'failed' ? '失败' : '通过'}</span>
+        <span>${(run.duration_ms / 1000).toFixed(2)}s</span>
+        <span>${run.started_at || ''}</span>
+      </div>
+    `).join('')}
+  `;
+}
+
+function renderReport(inv) {
+  $('#reportTitle').textContent = `${inv.title} / 复现报告`;
+  $('#reportBody').innerHTML = state.report
+    ? `<pre>${state.report.replace(/[&<>]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[s]))}</pre>`
+    : '<div class="empty-state">点击“生成报告”后展示 Markdown 结果。</div>';
+}
+
+function renderMetrics(inv) {
+  const runs = runsFor(inv);
+  const failures = runs.filter(r => r.status === 'failed');
+  $('#totalRuns').textContent = runs.length;
+  $('#runCount').textContent = runs.length;
+  $('#failRuns').textContent = failures.length;
+  $('#reproRate').textContent = runs.length ? fmtPct(failures.length / runs.length) : '0.0%';
+  $('#confidence').textContent = inv.suspects?.[0]?.score?.toFixed(2) || '0.00';
+  $('#reportMeta').textContent = `${runs.length} 次运行 · ${failures.length} 次失败`;
+}
+
+function renderEnvironment(inv) {
+  $('#envGrid').innerHTML = `
+    <span>Python <b>3.12</b></span>
+    <span>Framework <b>${inv.framework}</b></span>
+    <span>Timezone <b>UTC</b></span>
+    <span>Workspace <b>${inv.cwd || '/workspace'}</b></span>
+  `;
+}
+
+function render() {
+  const inv = selectedInvestigation();
+  if (inv) updateControls(inv);
+  renderCases();
+  if (inv) {
+    renderMetrics(inv);
+    renderSignals(inv);
+    renderMatrix(inv);
+    renderSuspects(inv);
+    renderRuns(inv);
+    renderEnvironment(inv);
+    renderReport(inv);
+  }
+  $$('.tab, .nav-item').forEach(node => node.classList.toggle('active', node.dataset.view === state.view));
+  $('#labView').classList.toggle('hidden', state.view !== 'lab');
+  $('#runsView').classList.toggle('hidden', state.view !== 'runs');
+  $('#reportsView').classList.toggle('hidden', state.view !== 'reports');
+  $('#runProgress').classList.toggle('hidden', !state.job || state.job.status !== 'running');
+  const progressLine = $('#runProgress .progress-line');
+  if (progressLine && !$('#cancelRunBtn')) {
+    const button = document.createElement('button');
+    button.className = 'text-btn'; button.id = 'cancelRunBtn'; button.type = 'button'; button.textContent = '取消实验';
+    progressLine.appendChild(button);
+    button.onclick = async () => {
+      if (!state.job || state.job.status !== 'running') return;
+      button.disabled = true; button.textContent = '取消中…';
+      await api.cancelJob(state.job.id); toast('已请求取消实验');
+    };
+  }
+  if (state.job && state.job.status === 'running') {
+    $('#progressText').textContent = `${state.job.progress} / ${state.job.total}`;
+    $('#progressBar').style.width = `${(state.job.progress / state.job.total) * 100}%`;
+  }
+}
+
+async function loadState() {
+  const payload = await api.state();
+  state.investigations = payload.investigations || [];
+  state.runs = payload.runs || [];
+  if (!state.selectedId && state.investigations[0]) state.selectedId = state.investigations[0].id;
+  if (!state.selectedId && !state.investigations.length) {
+    const created = await api.createInvestigation({
+      title: 'checkout race',
+      repo: 'demo-workspace',
+      framework: 'pytest-compatible',
+      command: 'python3 examples/flaky_case.py',
+      cwd: '/workspace/products/agent-skill-ideas',
+    });
+    state.selectedId = created.investigation.id;
+    return loadState();
+  }
+  const report = await api.report(state.selectedId);
+  state.report = report.markdown || '';
+  render();
+}
+
+async function refreshJob(jobId) {
+  const job = await api.job(jobId);
+  state.job = job;
+  render();
+  if (job.status === 'running') {
+    setTimeout(() => refreshJob(jobId), 700);
+  } else {
+    await loadState();
+    if (job.status === 'complete') toast('实验完成，数据已写入本地仓库');
+    else toast(job.error || '实验失败');
+  }
+}
+
+async function startRun() {
+  const inv = selectedInvestigation();
+  if (!inv || state.loading) return;
+  state.loading = true;
+  $('#startRunBtn').disabled = true;
+  $('#runProgress').classList.remove('hidden');
+  try {
+    const payload = {
+      repeats: Number($('#repeatInput').value || 12),
+      concurrency: Number($('#concurrencyInput').value || 4),
+      seed_mode: $('#seedInput').value,
+      seed: Number($('#seedValue').value || 42),
+      order_perturbation: $('#orderToggle').checked,
+      capture_environment: $('#envToggle').checked,
+      cwd: $('#cwdInput').value,
+      command: $('#commandText').textContent,
+    };
+    const res = await api.runInvestigation(inv.id, payload);
+    state.job = {status: 'running', progress: 0, total: payload.repeats};
+    render();
+    await refreshJob(res.job_id);
+  } catch (err) {
+    toast(err.message || '无法启动实验');
+  } finally {
+    state.loading = false;
+    $('#startRunBtn').disabled = false;
+  }
+}
+
+function markdownTextFor(inv) {
+  const runs = runsFor(inv);
+  const failures = runs.filter(r => r.status === 'failed');
+  const suspects = inv.suspects || [];
+  return [
+    `# ${inv.title} / 复现报告`,
+    '',
+    '## 结论',
+    `- 总运行: ${runs.length}`,
+    `- 失败次数: ${failures.length}`,
+    `- 复现率: ${runs.length ? fmtPct(failures.length / runs.length) : '0.0%'}`,
+    '',
+    '## 嫌疑变量',
+    ...(suspects.length ? suspects.map(item => `- ${item.name} (${item.score.toFixed(2)})`) : ['- 暂无']),
+    '',
+    '## 最小复现命令',
+    '```bash',
+    `${inv.command}`,
+    '```',
+    '',
+    '## 备注',
+    inv.notes || '',
+  ].join('\n');
+}
+
+function bind() {
+  const setView = view => {
+    state.view = view;
+    render();
+  };
+
+  // Bind navigation directly so it remains usable even if an API request fails.
+  $$('.tab[data-view], .nav-item[data-view]').forEach(node => {
+    node.addEventListener('click', event => {
+      event.preventDefault();
+      setView(node.dataset.view);
+    });
+  });
+
+  document.body.addEventListener('click', async event => {
+    const runButton = event.target.closest('[data-run]');
+    if (runButton) {
+      const run = state.runs.find(item => item.id === runButton.dataset.run);
+      if (run) openRunDialog(run);
+      return;
+    }
+    const caseButton = event.target.closest('[data-case]');
+    if (caseButton) {
+      state.selectedId = caseButton.dataset.case;
+      const report = await api.report(state.selectedId);
+      state.report = report.markdown || '';
+      render();
+      return;
+    }
+    const viewButton = event.target.closest('[data-view]');
+    if (viewButton) {
+      setView(viewButton.dataset.view);
+    }
+  });
+
+  $('#runBtn').onclick = () => { state.view = 'lab'; startRun(); };
+  $('#startRunBtn').onclick = startRun;
+  $('#loadMoreBtn').onclick = () => toast('当前视图已展示最近样本，运行记录里可看全部。');
+  $('#snapshotBtn').onclick = () => toast('环境快照由后端记录在每次运行里。');
+  $('#copyReportBtn').onclick = async () => {
+    const inv = selectedInvestigation();
+    await navigator.clipboard.writeText(markdownTextFor(inv));
+    toast('报告已复制');
+  };
+  $('#downloadReportBtn').onclick = async () => {
+    const inv = selectedInvestigation();
+    const blob = new Blob([markdownTextFor(inv)], {type: 'text/markdown'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${inv.title}-report.md`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 400);
+  };
+  $('#exportRunsBtn').onclick = () => {
+    const inv = selectedInvestigation();
+    const blob = new Blob([JSON.stringify(runsFor(inv), null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${inv.title}-runs.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 400);
+  };
+  $('#saveNoteBtn').onclick = async () => {
+    const inv = selectedInvestigation();
+    await api.updateInvestigation(inv.id, {notes: $('#notes').value, cwd: $('#cwdInput').value, command: $('#commandText').textContent});
+    toast('调查笔记已保存');
+    await loadState();
+  };
+  $('#editCommand').onclick = async () => {
+    const inv = selectedInvestigation();
+    const command = prompt('编辑测试命令', inv.command);
+    if (!command) return;
+    await api.updateInvestigation(inv.id, {command});
+    toast('测试命令已更新');
+    await loadState();
+  };
+  if ($('#editCwdBtn')) $('#editCwdBtn').onclick = async () => {
+    const inv = selectedInvestigation();
+    const cwd = prompt('编辑工作目录', inv.cwd || '/workspace');
+    if (!cwd) return;
+    await api.updateInvestigation(inv.id, {cwd});
+    toast('工作目录已更新');
+    await loadState();
+  };
+  $('#newCaseBtn').onclick = async () => {
+    const title = prompt('调查名称', 'new flaky case');
+    if (!title) return;
+    const created = await api.createInvestigation({
+      title,
+      repo: 'local-workspace',
+      framework: 'pytest',
+      command: 'python3 examples/flaky_case.py',
+      cwd: '/workspace/products/agent-skill-ideas',
+    });
+    state.selectedId = created.investigation.id;
+    toast('已创建调查');
+    await loadState();
+  };
+  $('#addCaseBtn').onclick = $('#newCaseBtn').onclick;
+  $('#generateReportBtn').onclick = async () => {
+    const inv = selectedInvestigation();
+    const res = await api.report(inv.id);
+    state.report = res.markdown || '';
+    state.view = 'reports';
+    render();
+  };
+  $('#closeRunDialog').onclick = () => $('#runDialog').close();
+}
+
+function openRunDialog(run) {
+  $('#dialogTitle').textContent = `${run.id.slice(0, 8)} · ${run.status === 'failed' ? '失败' : '通过'}`;
+  const tests = run.tests || [];
+  const esc = value => String(value || '').replace(/[&<>]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[s]));
+  const classification = run.classification || {};
+  $('#dialogBody').innerHTML = `<div class="evidence-grid"><span>Seed <b>${esc(run.seed)}</b></span><span>并发 <b>${esc(run.concurrency)}</b></span><span>失败分类 <b>${esc(classification.label || '待分类')}</b></span><span>指纹 <b>${esc(run.fingerprint || '—')}</b></span></div>
+    ${tests.length ? `<h3>测试结果</h3><div class="test-results">${tests.map(test => `<div><span class="${test.status === 'failed' ? 'fail' : 'pass'}">${test.status}</span><b>${esc(test.classname ? `${test.classname}::${test.name}` : test.name)}</b><small>${esc(test.message)}</small></div>`).join('')}</div>` : ''}
+    <h3>输出</h3><pre>${esc([run.stdout, run.stderr].filter(Boolean).join('\n')) || '无输出'}</pre>`;
+  $('#runDialog').showModal();
+}
+
+async function init() {
+  bind();
+  await loadState();
+  if (localStorage.ftiNote) $('#notes').value = localStorage.ftiNote;
+  $('#notes').addEventListener('input', () => {
+    localStorage.ftiNote = $('#notes').value;
+  });
+}
+
+init().catch(err => {
+  console.error(err);
+  toast('初始化失败');
+});
