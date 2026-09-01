@@ -68,3 +68,12 @@ def test_optional_ai_falls_back_to_local_without_key(monkeypatch):
     assert result["provider"] == "local"
     assert result["configured"] is False
     assert result["hypotheses"]
+
+
+def test_run_parallel_preserves_completion_metadata():
+    from experiment_runtime import run_parallel
+    import threading
+    jobs = {"job": {"status": "queued", "progress": 0, "total": 0, "samples": [], "completion_order": []}}
+    samples = run_parallel("job", [1, 2, 3], 2, lambda item: {"index": item, "value": item * 2}, jobs, threading.Lock())
+    assert [item["index"] for item in samples] == [1, 2, 3]
+    assert jobs["job"]["progress"] == 3

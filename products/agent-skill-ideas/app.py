@@ -15,7 +15,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -29,6 +29,13 @@ from runner import (env_snapshot as runner_env_snapshot, next_seed as runner_nex
                     parse_junit as runner_parse_junit, resolve_cwd as runner_resolve_cwd,
                     validate_command as runner_validate_command)
 from experiments import matrix_variants as experiment_matrix_variants
+from executor import execute as execute_process
+from job_manager import JobManager
+from server_utils import read_json_body as read_request_json, response as send_response
+from experiment_service import build_matrix_plan, build_repeat_plan
+from server import serve
+from experiment_runtime import run_parallel
+from api_routes import readonly
 
 ROOT = Path(__file__).resolve().parent
 WORKSPACE = ROOT.parents[1]
@@ -39,8 +46,9 @@ LEGACY_DB_PATH = DATA_DIR / "investigations.json"
 RUN_TIMEOUT = int(os.environ.get("FTI_RUN_TIMEOUT", "30"))
 ALLOWED_COMMANDS = {"pytest", "python", "python3", "npm", "npx", "yarn", "pnpm", "go"}
 
-jobs = {}
-jobs_lock = threading.Lock()
+job_manager = JobManager()
+jobs = job_manager.items
+jobs_lock = job_manager.lock
 db_lock = threading.RLock()
 
 
@@ -49,19 +57,11 @@ def now_iso():
 
 
 def read_json_body(handler):
-    length = int(handler.headers.get("content-length", "0"))
-    if not length:
-        return {}
-    return json.loads(handler.rfile.read(length).decode("utf-8"))
+    return read_request_json(handler)
 
 
 def response(handler, status, payload):
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("content-type", "application/json; charset=utf-8")
-    handler.send_header("content-length", str(len(body)))
-    handler.end_headers()
-    handler.wfile.write(body)
+    return send_response(handler, status, payload)
 
 
 def load_db():
@@ -295,32 +295,8 @@ def run_one(inv, config, run_number):
         junit_file.close()
         junit_path = junit_file.name
         command_parts.append(f"--junitxml={junit_path}")
-    try:
-        proc = subprocess.Popen(command_parts, cwd=str(cwd), env=env, text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
-        with jobs_lock:
-            active_job = config.get("_job_id")
-            if active_job and active_job in jobs:
-                jobs[active_job].setdefault("processes", []).append(proc.pid)
-        try:
-            stdout, stderr = proc.communicate(timeout=int(config.get("timeout") or RUN_TIMEOUT))
-            exit_code = proc.returncode
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, 15)
-            stdout, stderr = proc.communicate()
-            exit_code = 124
-            stderr = (stderr or "") + f"\nTimeout after {config.get('timeout') or RUN_TIMEOUT}s"
-        if active_job:
-            with jobs_lock:
-                if jobs.get(active_job, {}).get("cancel_requested"):
-                    exit_code = 130
-                    stderr = (stderr or "") + "\nCancelled by user"
-        stdout = stdout[-6000:]
-        stderr = stderr[-6000:]
-    except OSError as exc:
-        exit_code = 127
-        stdout = ""
-        stderr = str(exc)
+    active_job = config.get("_job_id")
+    stdout, stderr, exit_code = execute_process(command_parts, cwd, env, int(config.get("timeout") or RUN_TIMEOUT), active_job, jobs, jobs_lock)
     test_results = parse_junit(junit_path)
     if junit_path:
         try:
@@ -562,8 +538,8 @@ def pollution_bisect(inv, body):
 
 def create_job(inv_id, config):
     job_id = str(uuid.uuid4())
-    repeats = max(1, min(100, int(config.get("repeats") or 1)))
-    workers = max(1, min(16, int(config.get("concurrency") or 1)))
+    plan = build_repeat_plan(config)
+    repeats, workers = plan["repeats"], plan["workers"]
     with jobs_lock:
         jobs[job_id] = {
             "id": job_id, "status": "queued", "progress": 0, "total": repeats,
@@ -595,13 +571,12 @@ def matrix_variants(body):
 
 
 def create_matrix_job(inv_id, body):
-    variants = matrix_variants(body)
-    repeats = max(1, min(30, int(body.get("repeats_per_value") or 3)))
-    total = len(variants) * repeats
+    plan = build_matrix_plan(body)
+    variants, repeats, total = plan["variants"], plan["repeats"], plan["total"]
     job_id = str(uuid.uuid4())
     experiment_id = str(uuid.uuid4())
     with jobs_lock:
-        jobs[job_id] = {"id": job_id, "type": "matrix", "experiment_id": experiment_id, "status": "queued", "progress": 0, "total": total, "workers": max(1, min(8, int(body.get("matrix_workers") or 2))), "variants": variants, "completion_order": [], "samples": [], "error": ""}
+        jobs[job_id] = {"id": job_id, "type": "matrix", "experiment_id": experiment_id, "status": "queued", "progress": 0, "total": total, "workers": plan["workers"], "variants": variants, "completion_order": [], "samples": [], "error": ""}
     threading.Thread(target=run_matrix_job, args=(job_id, inv_id, body, variants, repeats), daemon=True).start()
     return job_id
 
@@ -623,26 +598,7 @@ def run_matrix_job(job_id, inv_id, body, variants, repeats):
                 config = {**base, variant["dimension"]: variant["value"]}
                 tasks.append((ordinal, variant, config))
         workers = jobs[job_id]["workers"]
-        with jobs_lock:
-            jobs[job_id]["status"] = "running"
-        new_runs = []
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(run_one, inv, config, ordinal): (ordinal, variant) for ordinal, variant, config in tasks}
-            for future in as_completed(futures):
-                with jobs_lock:
-                    if jobs[job_id].get("cancel_requested"):
-                        for pending in futures:
-                            pending.cancel()
-                        raise RuntimeError("扫描已取消")
-                ordinal, variant = futures[future]
-                sample = future.result()
-                sample.update({"experiment_id": experiment_id, "variant": variant})
-                new_runs.append(sample)
-                with jobs_lock:
-                    jobs[job_id]["samples"].append(sample)
-                    jobs[job_id]["progress"] += 1
-                    jobs[job_id]["completion_order"].append(ordinal)
-        new_runs.sort(key=lambda item: item["index"])
+        new_runs = run_parallel(job_id, tasks, workers, lambda task: run_one(inv, task[2], task[0]), jobs, jobs_lock, lambda sample, task: {**sample, "experiment_id": experiment_id, "variant": task[1]}, "扫描已取消")
         db = load_db()
         db["runs"].extend(new_runs)
         db.setdefault("experiments", []).append({"id": experiment_id, "investigation_id": inv_id, "type": "single_factor", "dimension": variants[0]["dimension"], "variants": variants, "repeats_per_value": repeats, "run_ids": [run["id"] for run in new_runs], "created_at": now_iso(), "status": "complete"})
@@ -664,24 +620,10 @@ def run_job(job_id, inv_id, config):
             raise ValueError("调查不存在")
         repeats = max(1, min(100, int(config.get("repeats") or 1)))
         with jobs_lock:
-            jobs[job_id].update({"status": "running", "total": repeats})
-        new_runs = []
+            jobs[job_id].update({"status": "queued", "total": repeats, "progress": 0, "samples": [], "completion_order": []})
         workers = max(1, min(16, int(config.get("concurrency") or 1)))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(run_one, inv, config, index) for index in range(1, repeats + 1)]
-            for future in as_completed(futures):
-                with jobs_lock:
-                    if jobs[job_id].get("cancel_requested"):
-                        for pending in futures:
-                            pending.cancel()
-                        raise RuntimeError("实验已取消")
-                sample = future.result()
-                new_runs.append(sample)
-                with jobs_lock:
-                    jobs[job_id]["samples"].append(sample)
-                    jobs[job_id]["progress"] += 1
-                    jobs[job_id]["completion_order"].append(sample["index"])
-        new_runs.sort(key=lambda item: item["index"])
+        tasks = [(index, config) for index in range(1, repeats + 1)]
+        new_runs = run_parallel(job_id, tasks, workers, lambda task: run_one(inv, config, task[0]), jobs, jobs_lock)
         db = load_db()
         db["runs"].extend(new_runs)
         inv = find_inv(db, inv_id)
@@ -760,6 +702,14 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        routed = readonly(parsed.path, {
+            "get_state": get_state, "load_db": load_db, "jobs": jobs, "jobs_lock": jobs_lock,
+            "find_inv": find_inv, "markdown_report": markdown_report, "fingerprint_history": fingerprint_history,
+            "compare_dimensions": compare_dimensions, "repro_bundle": repro_bundle, "ci_summary": ci_summary,
+            "explain": explain,
+        })
+        if routed is not None:
+            return response(self, routed[0], routed[1])
         if parsed.path == "/api/state":
             return response(self, 200, get_state())
         if parsed.path.startswith("/api/runs/"):
@@ -932,7 +882,4 @@ matrix_variants = experiment_matrix_variants
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8827"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"Flaky Test Investigator listening on 0.0.0.0:{port}", flush=True)
-    server.serve_forever()
+    serve(Handler)

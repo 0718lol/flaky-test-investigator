@@ -76,7 +76,9 @@ DeepSeek 是可选依赖，不影响核心实验。设置 `DEEPSEEK_API_KEY`（�
 
 ## 结构取舍
 
-当前版本有意保持单服务部署。分析核心已迁移到 `analysis.py`，SQLite/JSON 迁移和写入已迁移到 `storage.py`，运行约束和 JUnit 解析已迁移到 `runner.py`，矩阵规格校验已迁移到 `experiments.py`；`app.py` 通过兼容绑定继续提供旧函数名，避免破坏现有 runner 和 API。剩余技术债是进程编排、实验 job 生命周期和 HTTP 路由仍在 `app.py`，后续再拆成 `server.py`。前端约 460 行、样式约 600 行，主要是无构建依赖的产品壳，暂不建议为了“拆文件”引入打包链。
+当前版本有意保持单服务部署。分析核心已迁移到 `analysis.py`，SQLite/JSON 迁移和写入已迁移到 `storage.py`，运行约束和 JUnit 解析已迁移到 `runner.py`，矩阵规格校验已迁移到 `experiments.py`，实验计划计算已迁移到 `experiment_service.py`，普通/矩阵任务的并发进度循环已迁移到 `experiment_runtime.py`，子进程生命周期已迁移到 `executor.py`，job 注册表已迁移到 `job_manager.py`，HTTP JSON 序列化和服务启动已迁移到 `server_utils.py`、`server.py`。`app.py` 现在主要承担路由决策、持久化提交和兼容编排。前端约 460 行、样式约 600 行，主要是无构建依赖的产品壳，暂不建议为了“拆文件”引入打包链。
+
+只读 API 的资源分发已集中在 `api_routes.py`，通过依赖上下文调用分析、存储和报告服务；未知路径仍由静态文件 handler 处理。写接口暂时保留在 `app.py`，待路由契约稳定后再按资源迁移。
 
 ## 迭代建议
 
