@@ -17,7 +17,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
+
+from ai_assist import explain
+from analysis import (classify_failure as analyzed_classify_failure, compare_dimensions as analyzed_compare_dimensions,
+                      extract_signal as analyzed_extract_signal, failure_fingerprint as analyzed_failure_fingerprint,
+                      score_suspects as analyzed_score_suspects, signal_groups as analyzed_signal_groups,
+                      wilson_interval as analyzed_wilson_interval)
+from storage import StateStore
+from runner import (env_snapshot as runner_env_snapshot, next_seed as runner_next_seed,
+                    parse_junit as runner_parse_junit, resolve_cwd as runner_resolve_cwd,
+                    validate_command as runner_validate_command)
+from experiments import matrix_variants as experiment_matrix_variants
 
 ROOT = Path(__file__).resolve().parent
 WORKSPACE = ROOT.parents[1]
@@ -70,6 +81,8 @@ def load_db():
             payload = seed_db()
             conn.execute("INSERT INTO app_state(id, payload) VALUES(1, ?)", (json.dumps(payload, ensure_ascii=False),))
             conn.commit()
+        payload.setdefault("fingerprints", {})
+        payload.setdefault("experiments", [])
         conn.close()
         return payload
 
@@ -104,6 +117,8 @@ def seed_db():
             make_demo_run(inv_id, idx, failed)
             for idx, failed in enumerate([True, False, True, False, True, False], start=1)
         ],
+        "fingerprints": {},
+        "experiments": [],
     }
 
 
@@ -408,6 +423,106 @@ def signal_groups(runs):
             for key, value in sorted(groups.items(), key=lambda x: x[1]["count"], reverse=True)[:4]]
 
 
+def fingerprint_history(db, inv_id=None):
+    """Return recurring failure fingerprints, including evidence across investigations."""
+    groups = {}
+    for run in db.get("runs", []):
+        if run.get("status") != "failed":
+            continue
+        fp = run.get("fingerprint") or failure_fingerprint(run.get("signal"), run.get("stderr"), run.get("stdout"))
+        if not fp:
+            continue
+        item = groups.setdefault(fp, {"fingerprint": fp, "count": 0, "investigations": set(), "first_seen": run.get("started_at"), "last_seen": run.get("started_at"), "signal": run.get("signal") or "unknown failure"})
+        item["count"] += 1
+        item["investigations"].add(run.get("investigation_id"))
+        item["first_seen"] = min(filter(None, [item.get("first_seen"), run.get("started_at")]), default=item.get("first_seen"))
+        item["last_seen"] = max(filter(None, [item.get("last_seen"), run.get("started_at")]), default=item.get("last_seen"))
+    result = []
+    records = db.get("fingerprints", {})
+    for item in groups.values():
+        item["investigations"] = sorted(item["investigations"])
+        item["recurrence"] = len(item["investigations"]) > 1
+        record = records.get(item["fingerprint"], {})
+        status = record.get("status") or ("recurring" if item["recurrence"] or item["count"] > 1 else "new")
+        if status == "fixed" and record.get("resolved_at") and item.get("last_seen") and item["last_seen"] > record["resolved_at"]:
+            status = "regressed"
+        item.update({"status": status, "owner": record.get("owner", ""), "notes": record.get("notes", ""), "resolved_at": record.get("resolved_at")})
+        if inv_id and inv_id not in item["investigations"]:
+            continue
+        result.append(item)
+    return sorted(result, key=lambda item: (item["recurrence"], item["count"]), reverse=True)
+
+
+def compare_dimensions(runs):
+    """Build a compact comparison table for dimensions used by the experiment runner."""
+    dimensions = [("concurrency", "并发度"), ("seed", "随机种子"), ("order", "执行顺序"), ("cwd", "工作目录")]
+    result = []
+    for key, label in dimensions:
+        buckets = {}
+        for run in runs:
+            value = str(run.get(key, "unknown"))
+            buckets.setdefault(value, []).append(run)
+        values = []
+        for value, bucket in buckets.items():
+            failures = sum(1 for run in bucket if run.get("status") == "failed")
+            values.append({"value": value, "runs": len(bucket), "failures": failures, "rate": round(failures / len(bucket), 4) if bucket else 0})
+        values.sort(key=lambda item: (-item["rate"], item["value"]))
+        result.append({"key": key, "label": label, "values": values})
+    return result
+
+
+def repro_bundle(inv, runs, db):
+    failures = [run for run in runs if run.get("status") == "failed"]
+    latest = failures[-1] if failures else (runs[-1] if runs else {})
+    env = latest.get("env") or {}
+    return {
+        "format": "fti-repro-bundle/v1",
+        "generated_at": now_iso(),
+        "investigation": {key: inv.get(key) for key in ("id", "title", "repo", "framework", "command", "cwd", "notes")},
+        "reproduction": {
+            "command": inv.get("command"),
+            "cwd": inv.get("cwd"),
+            "seed": latest.get("seed"),
+            "concurrency": latest.get("concurrency"),
+            "order": latest.get("order"),
+            "environment": env,
+        },
+        "evidence": {
+            "runs": len(runs),
+            "failures": len(failures),
+            "fingerprints": signal_groups(runs),
+            "history": fingerprint_history(db, inv.get("id")),
+            "comparison": compare_dimensions(runs),
+            "latest_failure": {key: latest.get(key) for key in ("id", "started_at", "signal", "stderr", "stdout", "classification", "fingerprint")},
+        },
+        "next_steps": ["固定最可能变量后重复运行", "将失败日志与 fingerprint 关联到 CI 构建", "确认修复后运行同一矩阵作为回归基线"],
+    }
+
+
+def ci_summary(inv, runs, db):
+    failures = [run for run in runs if run.get("status") == "failed"]
+    history = fingerprint_history(db, inv["id"])
+    regressions = [item for item in history if item.get("status") == "regressed"]
+    new_failures = [item for item in history if item.get("status") == "new"]
+    conclusion = "failure" if regressions or new_failures else "neutral" if failures else "success"
+    lines = [
+        f"## Flaky Test Investigator: {inv['title']}", "",
+        f"**{len(runs)} runs · {len(failures)} failures · {(len(failures) / len(runs)) if runs else 0:.1%} reproduction rate**", "",
+    ]
+    if regressions:
+        lines.append(f"> {len(regressions)} previously fixed fingerprint(s) regressed.")
+    elif new_failures:
+        lines.append(f"> {len(new_failures)} new failure fingerprint(s) need triage.")
+    elif failures:
+        lines.append("> Only known recurring fingerprints were observed.")
+    else:
+        lines.append("> No failure reproduced in this sample set.")
+    lines.extend(["", "| Fingerprint | Status | Samples | Signal |", "| --- | --- | ---: | --- |"]) 
+    for item in history[:8]:
+        lines.append(f"| `{item['fingerprint']}` | {item['status']} | {item['count']} | {item['signal'][:100]} |")
+    return {"conclusion": conclusion, "markdown": "\n".join(lines), "annotations": [{"level": "failure" if item["status"] == "regressed" else "warning", "title": item["status"], "message": item["signal"], "fingerprint": item["fingerprint"]} for item in history if item["status"] in {"new", "regressed"}]}
+
+
 def get_state():
     db = load_db()
     summaries = [investigation_summary(inv, db["runs"]) for inv in db["investigations"]]
@@ -457,6 +572,87 @@ def create_job(inv_id, config):
     thread = threading.Thread(target=run_job, args=(job_id, inv_id, config), daemon=True)
     thread.start()
     return job_id
+
+
+def matrix_variants(body):
+    dimension = str(body.get("dimension") or "concurrency")
+    allowed = {"concurrency", "seed", "order_perturbation"}
+    if dimension not in allowed:
+        raise ValueError("扫描维度仅支持 concurrency、seed、order_perturbation")
+    raw_values = body.get("values") or []
+    if not isinstance(raw_values, list) or not raw_values or len(raw_values) > 12:
+        raise ValueError("values 必须包含 1-12 个扫描值")
+    variants = []
+    for raw in raw_values:
+        if dimension in {"concurrency", "seed"}:
+            value = int(raw)
+            if dimension == "concurrency" and not 1 <= value <= 16:
+                raise ValueError("concurrency 必须在 1-16 之间")
+        else:
+            value = raw if isinstance(raw, bool) else str(raw).lower() in {"true", "1", "yes", "on"}
+        variants.append({"dimension": dimension, "value": value, "label": f"{dimension}={str(value).lower()}"})
+    return variants
+
+
+def create_matrix_job(inv_id, body):
+    variants = matrix_variants(body)
+    repeats = max(1, min(30, int(body.get("repeats_per_value") or 3)))
+    total = len(variants) * repeats
+    job_id = str(uuid.uuid4())
+    experiment_id = str(uuid.uuid4())
+    with jobs_lock:
+        jobs[job_id] = {"id": job_id, "type": "matrix", "experiment_id": experiment_id, "status": "queued", "progress": 0, "total": total, "workers": max(1, min(8, int(body.get("matrix_workers") or 2))), "variants": variants, "completion_order": [], "samples": [], "error": ""}
+    threading.Thread(target=run_matrix_job, args=(job_id, inv_id, body, variants, repeats), daemon=True).start()
+    return job_id
+
+
+def run_matrix_job(job_id, inv_id, body, variants, repeats):
+    try:
+        db = load_db()
+        inv = find_inv(db, inv_id)
+        if not inv:
+            raise ValueError("调查不存在")
+        experiment_id = jobs[job_id]["experiment_id"]
+        base = dict(body.get("base_config") or {})
+        base.update({"command": body.get("command") or inv["command"], "cwd": body.get("cwd") or inv.get("cwd"), "_job_id": job_id})
+        tasks = []
+        ordinal = 0
+        for variant in variants:
+            for _ in range(repeats):
+                ordinal += 1
+                config = {**base, variant["dimension"]: variant["value"]}
+                tasks.append((ordinal, variant, config))
+        workers = jobs[job_id]["workers"]
+        with jobs_lock:
+            jobs[job_id]["status"] = "running"
+        new_runs = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(run_one, inv, config, ordinal): (ordinal, variant) for ordinal, variant, config in tasks}
+            for future in as_completed(futures):
+                with jobs_lock:
+                    if jobs[job_id].get("cancel_requested"):
+                        for pending in futures:
+                            pending.cancel()
+                        raise RuntimeError("扫描已取消")
+                ordinal, variant = futures[future]
+                sample = future.result()
+                sample.update({"experiment_id": experiment_id, "variant": variant})
+                new_runs.append(sample)
+                with jobs_lock:
+                    jobs[job_id]["samples"].append(sample)
+                    jobs[job_id]["progress"] += 1
+                    jobs[job_id]["completion_order"].append(ordinal)
+        new_runs.sort(key=lambda item: item["index"])
+        db = load_db()
+        db["runs"].extend(new_runs)
+        db.setdefault("experiments", []).append({"id": experiment_id, "investigation_id": inv_id, "type": "single_factor", "dimension": variants[0]["dimension"], "variants": variants, "repeats_per_value": repeats, "run_ids": [run["id"] for run in new_runs], "created_at": now_iso(), "status": "complete"})
+        save_db(db)
+        with jobs_lock:
+            jobs[job_id]["status"] = "complete"
+    except Exception as exc:
+        with jobs_lock:
+            jobs[job_id]["status"] = "cancelled" if jobs[job_id].get("cancel_requested") else "failed"
+            jobs[job_id]["error"] = str(exc)
 
 
 def run_job(job_id, inv_id, config):
@@ -543,6 +739,18 @@ def markdown_report(inv_id):
         lines.extend(["", "## Failure fingerprints"])
         for group in signal_groups(runs):
             lines.append(f"- `{group['fingerprint']}`: {group['count']} samples / {group['signal']}")
+    db = load_db()
+    history = fingerprint_history(db, inv_id)
+    recurring = [item for item in history if item.get("recurrence")]
+    if recurring:
+        lines.extend(["", "## Historical recurrence"])
+        for item in recurring[:5]:
+            lines.append(f"- `{item['fingerprint']}`: {item['count']} samples across {len(item['investigations'])} investigations; last seen {item['last_seen']}")
+    lines.extend(["", "## Variable comparison"])
+    for dimension in compare_dimensions(runs):
+        if dimension["values"]:
+            values = ", ".join(f"{item['value']}={item['rate']:.0%} ({item['failures']}/{item['runs']})" for item in dimension["values"][:5])
+            lines.append(f"- {dimension['label']}: {values}")
     return "\n".join(lines)
 
 
@@ -568,6 +776,49 @@ class Handler(SimpleHTTPRequestHandler):
             inv_id = parsed.path.split("/")[3]
             report = markdown_report(inv_id)
             return response(self, 200 if report else 404, {"markdown": report} if report else {"error": "not found"})
+        if parsed.path.startswith("/api/investigations/") and parsed.path.endswith("/history"):
+            inv_id = parsed.path.split("/")[3]
+            db = load_db()
+            if not find_inv(db, inv_id):
+                return response(self, 404, {"error": "not found"})
+            return response(self, 200, {"history": fingerprint_history(db, inv_id)})
+        if parsed.path.startswith("/api/investigations/") and parsed.path.endswith("/compare"):
+            inv_id = parsed.path.split("/")[3]
+            db = load_db()
+            inv = find_inv(db, inv_id)
+            if not inv:
+                return response(self, 404, {"error": "not found"})
+            runs = [run for run in db.get("runs", []) if run.get("investigation_id") == inv_id]
+            return response(self, 200, {"dimensions": compare_dimensions(runs), "runs": len(runs)})
+        if parsed.path.startswith("/api/investigations/") and parsed.path.endswith("/repro-bundle"):
+            inv_id = parsed.path.split("/")[3]
+            db = load_db()
+            inv = find_inv(db, inv_id)
+            if not inv:
+                return response(self, 404, {"error": "not found"})
+            runs = [run for run in db.get("runs", []) if run.get("investigation_id") == inv_id]
+            return response(self, 200, repro_bundle(inv, runs, db))
+        if parsed.path.startswith("/api/investigations/") and parsed.path.endswith("/ci-summary"):
+            inv_id = parsed.path.split("/")[3]
+            db = load_db()
+            inv = find_inv(db, inv_id)
+            if not inv:
+                return response(self, 404, {"error": "not found"})
+            runs = [run for run in db.get("runs", []) if run.get("investigation_id") == inv_id]
+            return response(self, 200, ci_summary(inv, runs, db))
+        if parsed.path.startswith("/api/investigations/") and parsed.path.endswith("/experiments"):
+            inv_id = parsed.path.split("/")[3]
+            db = load_db()
+            experiments = [item for item in db.get("experiments", []) if item.get("investigation_id") == inv_id]
+            return response(self, 200, {"experiments": experiments})
+        if parsed.path.startswith("/api/investigations/") and parsed.path.endswith("/assist"):
+            inv_id = parsed.path.split("/")[3]
+            db = load_db()
+            inv = find_inv(db, inv_id)
+            if not inv:
+                return response(self, 404, {"error": "not found"})
+            runs = [run for run in db.get("runs", []) if run.get("investigation_id") == inv_id]
+            return response(self, 200, explain(inv, runs))
         return super().do_GET()
 
     def do_POST(self):
@@ -602,6 +853,14 @@ class Handler(SimpleHTTPRequestHandler):
                 body = read_json_body(self)
                 job_id = create_job(inv_id, body)
                 return response(self, 202, {"job_id": job_id})
+            if parsed.path.startswith("/api/investigations/") and parsed.path.endswith("/matrix-runs"):
+                inv_id = parsed.path.split("/")[3]
+                body = read_json_body(self)
+                db = load_db()
+                if not find_inv(db, inv_id):
+                    return response(self, 404, {"error": "not found"})
+                job_id = create_matrix_job(inv_id, body)
+                return response(self, 202, {"job_id": job_id})
             if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/cancel"):
                 job_id = parsed.path.split("/")[3]
                 with jobs_lock:
@@ -622,6 +881,18 @@ class Handler(SimpleHTTPRequestHandler):
     def do_PATCH(self):
         parsed = urlparse(self.path)
         try:
+            if parsed.path.startswith("/api/fingerprints/"):
+                fingerprint = parsed.path.rsplit("/", 1)[-1]
+                body = read_json_body(self)
+                status = body.get("status")
+                if status not in {"active", "fixed", "ignored"}:
+                    raise ValueError("status 仅支持 active、fixed、ignored")
+                db = load_db()
+                record = db.setdefault("fingerprints", {}).setdefault(fingerprint, {})
+                record.update({"status": status, "owner": str(body.get("owner") or record.get("owner") or ""), "notes": str(body.get("notes") or record.get("notes") or ""), "updated_at": now_iso()})
+                record["resolved_at"] = now_iso() if status == "fixed" else None
+                save_db(db)
+                return response(self, 200, {"fingerprint": fingerprint, **record})
             if parsed.path.startswith("/api/investigations/"):
                 inv_id = parsed.path.rsplit("/", 1)[-1]
                 body = read_json_body(self)
@@ -640,6 +911,24 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as exc:
             return response(self, 400, {"error": str(exc)})
         return response(self, 404, {"error": "not found"})
+
+
+store = StateStore(DB_PATH, DATA_DIR, LEGACY_DB_PATH, seed_db)
+load_db = store.load
+save_db = store.save
+failure_fingerprint = analyzed_failure_fingerprint
+extract_signal = analyzed_extract_signal
+classify_failure = analyzed_classify_failure
+score_suspects = analyzed_score_suspects
+signal_groups = analyzed_signal_groups
+wilson_interval = analyzed_wilson_interval
+compare_dimensions = analyzed_compare_dimensions
+env_snapshot = lambda: runner_env_snapshot(ROOT)
+resolve_cwd = lambda cwd: runner_resolve_cwd(cwd, WORKSPACE)
+validate_command = runner_validate_command
+next_seed = runner_next_seed
+parse_junit = runner_parse_junit
+matrix_variants = experiment_matrix_variants
 
 
 if __name__ == "__main__":

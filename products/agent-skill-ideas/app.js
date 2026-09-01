@@ -20,6 +20,10 @@ const api = {
   job: id => fetch(`/api/jobs/${id}`).then(r => r.json()),
   cancelJob: id => fetch(`/api/jobs/${id}/cancel`, {method: 'POST'}).then(r => r.json()),
   report: id => fetch(`/api/investigations/${id}/report`).then(r => r.json()),
+  history: id => fetch(`/api/investigations/${id}/history`).then(r => r.json()),
+  compare: id => fetch(`/api/investigations/${id}/compare`).then(r => r.json()),
+  bundle: id => fetch(`/api/investigations/${id}/repro-bundle`).then(r => r.json()),
+  assist: id => fetch(`/api/investigations/${id}/assist`).then(r => r.json()),
 };
 
 const $ = s => document.querySelector(s);
@@ -34,6 +38,9 @@ const state = {
   job: null,
   loading: false,
   report: '',
+  history: [],
+  comparison: null,
+  assist: null,
 };
 
 function toast(message) {
@@ -138,9 +145,9 @@ function renderRuns(inv) {
 
 function renderReport(inv) {
   $('#reportTitle').textContent = `${inv.title} / 复现报告`;
-  $('#reportBody').innerHTML = state.report
-    ? `<pre>${state.report.replace(/[&<>]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[s]))}</pre>`
-    : '<div class="empty-state">点击“生成报告”后展示 Markdown 结果。</div>';
+  const esc = value => String(value || '').replace(/[&<>]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[s]));
+  const ai = state.assist ? `<section class="assist-box"><div><b>根因解释建议</b><small>${state.assist.provider === 'deepseek' ? 'DeepSeek 辅助 · 仅供验证' : '本地规则 · 无外部 API'}</small></div><p>${esc(state.assist.summary)}</p>${(state.assist.hypotheses || []).map(item => `<span>${esc(item)}</span>`).join('')}</section>` : '';
+  $('#reportBody').innerHTML = (state.report ? `<pre>${esc(state.report)}</pre>` : '<div class="empty-state">点击“生成报告”后展示 Markdown 结果。</div>') + ai;
 }
 
 function renderMetrics(inv) {
@@ -216,6 +223,10 @@ async function loadState() {
   }
   const report = await api.report(state.selectedId);
   state.report = report.markdown || '';
+  state.assist = null;
+  const [history, comparison] = await Promise.all([api.history(state.selectedId), api.compare(state.selectedId)]);
+  state.history = history.history || [];
+  state.comparison = comparison;
   render();
 }
 
@@ -323,6 +334,20 @@ function bind() {
 
   $('#runBtn').onclick = () => { state.view = 'lab'; startRun(); };
   $('#startRunBtn').onclick = startRun;
+  const scanButton = document.createElement('button');
+  scanButton.className = 'btn ghost wide';
+  scanButton.type = 'button';
+  scanButton.textContent = '单因素扫描';
+  scanButton.title = '自动比较并发度、seed 或顺序扰动';
+  $('#startRunBtn').insertAdjacentElement('afterend', scanButton);
+  scanButton.onclick = () => openMatrixDialog(async ({dimension, values, repeats}) => {
+    const inv = selectedInvestigation();
+    scanButton.disabled = true;
+    try {
+      const res = await fetch(`/api/investigations/${inv.id}/matrix-runs`, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({dimension, values, repeats_per_value: repeats, command: $('#commandText').textContent, cwd: $('#cwdInput').value, base_config: {seed_mode: 'fixed', seed: Number($('#seedValue').value || 42), order_perturbation: $('#orderToggle').checked, capture_environment: $('#envToggle').checked}})}).then(r => r.json());
+      state.job = {status:'running', progress:0, total: values.length * repeats}; render(); await refreshJob(res.job_id); toast('单因素扫描完成');
+    } catch (err) { toast(err.message || '扫描启动失败'); } finally { scanButton.disabled = false; }
+  });
   $('#loadMoreBtn').onclick = () => toast('当前视图已展示最近样本，运行记录里可看全部。');
   $('#snapshotBtn').onclick = () => toast('环境快照由后端记录在每次运行里。');
   $('#copyReportBtn').onclick = async () => {
@@ -339,6 +364,28 @@ function bind() {
     a.download = `${inv.title}-report.md`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 400);
+  };
+  $('#downloadBundleBtn').onclick = async () => {
+    const inv = selectedInvestigation();
+    const bundle = await api.bundle(inv.id);
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = `${inv.title}-repro-bundle.json`; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 400);
+    toast('复现包已导出');
+  };
+  const assistButton = document.createElement('button');
+  assistButton.className = 'btn ghost'; assistButton.type = 'button'; assistButton.textContent = '生成根因建议';
+  $('#downloadBundleBtn').insertAdjacentElement('afterend', assistButton);
+  assistButton.onclick = async () => {
+    const inv = selectedInvestigation(); assistButton.disabled = true;
+    try { state.assist = await api.assist(inv.id); state.view = 'reports'; render(); toast('根因建议已生成'); }
+    catch (err) { toast(err.message || '建议生成失败'); }
+    finally { assistButton.disabled = false; }
+  };
+  $('#historyBtn').onclick = () => {
+    const recurring = (state.history || []).filter(item => item.recurrence);
+    toast(recurring.length ? `发现 ${recurring.length} 个跨调查复发指纹` : '暂无跨调查复发指纹');
   };
   $('#exportRunsBtn').onclick = () => {
     const inv = selectedInvestigation();
@@ -406,6 +453,26 @@ function openRunDialog(run) {
     ${tests.length ? `<h3>测试结果</h3><div class="test-results">${tests.map(test => `<div><span class="${test.status === 'failed' ? 'fail' : 'pass'}">${test.status}</span><b>${esc(test.classname ? `${test.classname}::${test.name}` : test.name)}</b><small>${esc(test.message)}</small></div>`).join('')}</div>` : ''}
     <h3>输出</h3><pre>${esc([run.stdout, run.stderr].filter(Boolean).join('\n')) || '无输出'}</pre>`;
   $('#runDialog').showModal();
+}
+
+function openMatrixDialog(onSubmit) {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'run-dialog';
+  dialog.innerHTML = `<div class="dialog-head"><div><span class="eyebrow">Experiment design</span><h2>单因素扫描</h2></div><button class="icon-btn" type="button" data-close>×</button></div><form class="dialog-body matrix-form"><p>固定其它配置，只改变一个变量，自动比较失败率。</p><label>扫描维度<select name="dimension"><option value="concurrency">并发度</option><option value="seed">随机种子</option><option value="order_perturbation">顺序扰动</option></select></label><label>扫描值<input name="values" value="1,2,4,8" required><small>逗号分隔，最多 12 个值</small></label><label>每个值重复次数<input name="repeats" type="number" min="1" max="30" value="3" required></label><div class="dialog-actions"><button class="btn ghost" type="button" data-close>取消</button><button class="btn primary" type="submit">开始扫描</button></div></form>`;
+  document.body.appendChild(dialog);
+  const dimension = dialog.querySelector('[name=dimension]');
+  const values = dialog.querySelector('[name=values]');
+  dimension.onchange = () => { values.value = dimension.value === 'seed' ? '1,2,3,4' : dimension.value === 'order_perturbation' ? 'false,true' : '1,2,4,8'; };
+  dialog.querySelectorAll('[data-close]').forEach(button => { button.onclick = () => dialog.close(); });
+  dialog.querySelector('form').onsubmit = event => {
+    event.preventDefault();
+    const parsed = values.value.split(',').map(item => item.trim()).filter(Boolean);
+    if (!parsed.length || parsed.length > 12) return toast('请输入 1-12 个扫描值');
+    onSubmit({dimension: dimension.value, values: parsed, repeats: Number(dialog.querySelector('[name=repeats]').value || 3)});
+    dialog.close();
+  };
+  dialog.addEventListener('close', () => dialog.remove(), {once: true});
+  dialog.showModal();
 }
 
 async function init() {
