@@ -7,13 +7,9 @@ import re
 import random
 import shlex
 import sqlite3
-import subprocess
 import threading
 import time
-import tempfile
-import uuid
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
@@ -32,10 +28,13 @@ from experiments import matrix_variants as experiment_matrix_variants
 from executor import execute as execute_process
 from job_manager import JobManager
 from server_utils import read_json_body as read_request_json, response as send_response
-from experiment_service import build_matrix_plan, build_repeat_plan
-from server import serve
+from experiment_service import build_repeat_plan
 from experiment_runtime import run_parallel
+from server import serve
 from api_routes import readonly
+from job_service import (create_job as create_investigation_job, create_matrix_job as create_experiment_job,
+                         pollution_bisect as run_pollution_bisect)
+from write_routes import handle_patch as handle_write_patch, handle_post as handle_write_post
 
 ROOT = Path(__file__).resolve().parent
 WORKSPACE = ROOT.parents[1]
@@ -512,133 +511,80 @@ def find_inv(db, inv_id):
     return None
 
 
-def pollution_bisect(inv, body):
-    target = str(body.get("target") or "").strip()
-    candidates = [str(x).strip() for x in body.get("candidates", []) if str(x).strip()]
-    if not target or not candidates:
-        raise ValueError("需要 target 和 candidates")
-    parts = validate_command(body.get("command") or inv["command"])
-    cwd = resolve_cwd(body.get("cwd") or inv.get("cwd") or WORKSPACE)
-    seed = int(body.get("seed") or 42)
-    checks = []
-    remaining = candidates[:]
-    while len(remaining) > 1:
-        midpoint = max(1, len(remaining) // 2)
-        group = remaining[:midpoint]
-        pollution_env = {**os.environ, "FTI_SEED": str(seed)}
-        if PRODUCT_VENV.exists():
-            pollution_env["PATH"] = f"{PRODUCT_VENV}{os.pathsep}{pollution_env.get('PATH', '')}"
-        proc = subprocess.run(parts + group + [target], cwd=str(cwd), env=pollution_env,
-                              text=True, capture_output=True, timeout=RUN_TIMEOUT)
-        failed = proc.returncode != 0
-        checks.append({"candidates": group, "target": target, "failed": failed, "output": (proc.stdout + proc.stderr)[-2000:]})
-        remaining = group if failed else remaining[midpoint:]
-    return {"target": target, "polluter": remaining[0], "checks": checks, "confidence": "候选集合二分结果，需重复验证"}
-
-
-def create_job(inv_id, config):
-    job_id = str(uuid.uuid4())
-    plan = build_repeat_plan(config)
-    repeats, workers = plan["repeats"], plan["workers"]
-    with jobs_lock:
-        jobs[job_id] = {
-            "id": job_id, "status": "queued", "progress": 0, "total": repeats,
-            "workers": workers, "config": config, "completion_order": [], "samples": [], "error": "",
-        }
-    thread = threading.Thread(target=run_job, args=(job_id, inv_id, config), daemon=True)
-    thread.start()
-    return job_id
-
-
-def matrix_variants(body):
-    dimension = str(body.get("dimension") or "concurrency")
-    allowed = {"concurrency", "seed", "order_perturbation"}
-    if dimension not in allowed:
-        raise ValueError("扫描维度仅支持 concurrency、seed、order_perturbation")
-    raw_values = body.get("values") or []
-    if not isinstance(raw_values, list) or not raw_values or len(raw_values) > 12:
-        raise ValueError("values 必须包含 1-12 个扫描值")
-    variants = []
-    for raw in raw_values:
-        if dimension in {"concurrency", "seed"}:
-            value = int(raw)
-            if dimension == "concurrency" and not 1 <= value <= 16:
-                raise ValueError("concurrency 必须在 1-16 之间")
-        else:
-            value = raw if isinstance(raw, bool) else str(raw).lower() in {"true", "1", "yes", "on"}
-        variants.append({"dimension": dimension, "value": value, "label": f"{dimension}={str(value).lower()}"})
-    return variants
-
-
-def create_matrix_job(inv_id, body):
-    plan = build_matrix_plan(body)
-    variants, repeats, total = plan["variants"], plan["repeats"], plan["total"]
-    job_id = str(uuid.uuid4())
-    experiment_id = str(uuid.uuid4())
-    with jobs_lock:
-        jobs[job_id] = {"id": job_id, "type": "matrix", "experiment_id": experiment_id, "status": "queued", "progress": 0, "total": total, "workers": plan["workers"], "variants": variants, "completion_order": [], "samples": [], "error": ""}
-    threading.Thread(target=run_matrix_job, args=(job_id, inv_id, body, variants, repeats), daemon=True).start()
-    return job_id
-
-
-def run_matrix_job(job_id, inv_id, body, variants, repeats):
-    try:
-        db = load_db()
-        inv = find_inv(db, inv_id)
-        if not inv:
-            raise ValueError("调查不存在")
-        experiment_id = jobs[job_id]["experiment_id"]
-        base = dict(body.get("base_config") or {})
-        base.update({"command": body.get("command") or inv["command"], "cwd": body.get("cwd") or inv.get("cwd"), "_job_id": job_id})
-        tasks = []
-        ordinal = 0
-        for variant in variants:
-            for _ in range(repeats):
-                ordinal += 1
-                config = {**base, variant["dimension"]: variant["value"]}
-                tasks.append((ordinal, variant, config))
-        workers = jobs[job_id]["workers"]
-        new_runs = run_parallel(job_id, tasks, workers, lambda task: run_one(inv, task[2], task[0]), jobs, jobs_lock, lambda sample, task: {**sample, "experiment_id": experiment_id, "variant": task[1]}, "扫描已取消")
-        db = load_db()
-        db["runs"].extend(new_runs)
-        db.setdefault("experiments", []).append({"id": experiment_id, "investigation_id": inv_id, "type": "single_factor", "dimension": variants[0]["dimension"], "variants": variants, "repeats_per_value": repeats, "run_ids": [run["id"] for run in new_runs], "created_at": now_iso(), "status": "complete"})
-        save_db(db)
-        with jobs_lock:
-            jobs[job_id]["status"] = "complete"
-    except Exception as exc:
-        with jobs_lock:
-            jobs[job_id]["status"] = "cancelled" if jobs[job_id].get("cancel_requested") else "failed"
-            jobs[job_id]["error"] = str(exc)
-
-
-def run_job(job_id, inv_id, config):
-    try:
-        config = {**config, "_job_id": job_id}
-        db = load_db()
-        inv = find_inv(db, inv_id)
-        if not inv:
-            raise ValueError("调查不存在")
-        repeats = max(1, min(100, int(config.get("repeats") or 1)))
-        with jobs_lock:
-            jobs[job_id].update({"status": "queued", "total": repeats, "progress": 0, "samples": [], "completion_order": []})
-        workers = max(1, min(16, int(config.get("concurrency") or 1)))
-        tasks = [(index, config) for index in range(1, repeats + 1)]
-        new_runs = run_parallel(job_id, tasks, workers, lambda task: run_one(inv, config, task[0]), jobs, jobs_lock)
-        db = load_db()
-        db["runs"].extend(new_runs)
-        inv = find_inv(db, inv_id)
-        inv["command"] = config.get("command") or inv["command"]
-        inv["cwd"] = str(resolve_cwd(config.get("cwd") or inv.get("cwd") or WORKSPACE))
-        inv["updated_at"] = now_iso()
-        save_db(db)
-        with jobs_lock:
-            jobs[job_id]["status"] = "complete"
-    except Exception as exc:
-        with jobs_lock:
-            jobs[job_id]["status"] = "failed"
-            jobs[job_id]["error"] = str(exc)
-            if jobs[job_id].get("cancel_requested"):
-                jobs[job_id]["status"] = "cancelled"
+def route_context():
+    return {
+        "get_state": get_state,
+        "load_db": load_db,
+        "save_db": save_db,
+        "jobs": jobs,
+        "jobs_lock": jobs_lock,
+        "find_inv": find_inv,
+        "markdown_report": markdown_report,
+        "fingerprint_history": fingerprint_history,
+        "compare_dimensions": compare_dimensions,
+        "repro_bundle": repro_bundle,
+        "ci_summary": ci_summary,
+        "explain": explain,
+        "investigation_summary": investigation_summary,
+        "resolve_cwd": lambda cwd: runner_resolve_cwd(cwd, WORKSPACE),
+        "workspace": WORKSPACE,
+        "now_iso": now_iso,
+        "build_repeat_plan": build_repeat_plan,
+        "create_job": lambda inv_id, config, deps: create_investigation_job(
+            inv_id,
+            config,
+            {
+                **deps,
+                "execute_process": execute_process,
+                "run_parallel": run_parallel,
+                "product_venv": PRODUCT_VENV,
+                "run_timeout": RUN_TIMEOUT,
+                "validate_command": runner_validate_command,
+                "next_seed": runner_next_seed,
+                "parse_junit": runner_parse_junit,
+                "env_snapshot": lambda: runner_env_snapshot(ROOT),
+                "failure_fingerprint": analyzed_failure_fingerprint,
+                "extract_signal": analyzed_extract_signal,
+                "classify_failure": analyzed_classify_failure,
+                "score_suspects": analyzed_score_suspects,
+                "signal_groups": analyzed_signal_groups,
+                "wilson_interval": analyzed_wilson_interval,
+            },
+        ),
+        "create_matrix_job": lambda inv_id, body, deps: create_experiment_job(
+            inv_id,
+            body,
+            {
+                **deps,
+                "execute_process": execute_process,
+                "run_parallel": run_parallel,
+                "product_venv": PRODUCT_VENV,
+                "run_timeout": RUN_TIMEOUT,
+                "validate_command": runner_validate_command,
+                "next_seed": runner_next_seed,
+                "parse_junit": runner_parse_junit,
+                "env_snapshot": lambda: runner_env_snapshot(ROOT),
+                "failure_fingerprint": analyzed_failure_fingerprint,
+                "extract_signal": analyzed_extract_signal,
+                "classify_failure": analyzed_classify_failure,
+                "score_suspects": analyzed_score_suspects,
+                "signal_groups": analyzed_signal_groups,
+                "wilson_interval": analyzed_wilson_interval,
+            },
+        ),
+        "pollution_bisect": lambda inv, body, deps: run_pollution_bisect(
+            inv,
+            body,
+            {
+                **deps,
+                "execute_process": execute_process,
+                "run_parallel": run_parallel,
+                "product_venv": PRODUCT_VENV,
+                "run_timeout": RUN_TIMEOUT,
+                "validate_command": runner_validate_command,
+            },
+        ),
+    }
 
 
 def markdown_report(inv_id):
@@ -702,12 +648,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        routed = readonly(parsed.path, {
-            "get_state": get_state, "load_db": load_db, "jobs": jobs, "jobs_lock": jobs_lock,
-            "find_inv": find_inv, "markdown_report": markdown_report, "fingerprint_history": fingerprint_history,
-            "compare_dimensions": compare_dimensions, "repro_bundle": repro_bundle, "ci_summary": ci_summary,
-            "explain": explain,
-        })
+        ctx = route_context()
+        routed = readonly(parsed.path, ctx)
         if routed is not None:
             return response(self, routed[0], routed[1])
         if parsed.path == "/api/state":
@@ -774,56 +716,9 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         try:
-            if parsed.path.startswith("/api/investigations/") and parsed.path.endswith("/pollution-bisect"):
-                inv_id = parsed.path.split("/")[3]
-                body = read_json_body(self)
-                db = load_db(); inv = find_inv(db, inv_id)
-                if not inv:
-                    return response(self, 404, {"error": "not found"})
-                return response(self, 200, pollution_bisect(inv, body))
-            if parsed.path == "/api/investigations":
-                body = read_json_body(self)
-                db = load_db()
-                inv = {
-                    "id": str(uuid.uuid4()),
-                    "title": body.get("title") or "new flaky case",
-                    "repo": body.get("repo") or "local-workspace",
-                    "framework": body.get("framework") or "pytest",
-                    "command": body.get("command") or "pytest -q",
-                    "cwd": str(resolve_cwd(body.get("cwd") or WORKSPACE)),
-                    "notes": "",
-                    "created_at": now_iso(),
-                    "updated_at": now_iso(),
-                }
-                db["investigations"].append(inv)
-                save_db(db)
-                return response(self, 201, {"investigation": investigation_summary(inv, db["runs"])})
-            if parsed.path.startswith("/api/investigations/") and parsed.path.endswith("/runs"):
-                inv_id = parsed.path.split("/")[3]
-                body = read_json_body(self)
-                job_id = create_job(inv_id, body)
-                return response(self, 202, {"job_id": job_id})
-            if parsed.path.startswith("/api/investigations/") and parsed.path.endswith("/matrix-runs"):
-                inv_id = parsed.path.split("/")[3]
-                body = read_json_body(self)
-                db = load_db()
-                if not find_inv(db, inv_id):
-                    return response(self, 404, {"error": "not found"})
-                job_id = create_matrix_job(inv_id, body)
-                return response(self, 202, {"job_id": job_id})
-            if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/cancel"):
-                job_id = parsed.path.split("/")[3]
-                with jobs_lock:
-                    job = jobs.get(job_id)
-                    if not job:
-                        return response(self, 404, {"error": "job not found"})
-                    job["cancel_requested"] = True
-                    for pid in job.get("processes", []):
-                        try:
-                            os.killpg(pid, 15)
-                        except ProcessLookupError:
-                            pass
-                return response(self, 202, {"job_id": job_id, "status": "cancelling"})
+            route = handle_write_post(self, parsed.path, route_context())
+            if route is not None:
+                return response(self, route[0], route[1])
         except Exception as exc:
             return response(self, 400, {"error": str(exc)})
         return response(self, 404, {"error": "not found"})
@@ -831,33 +726,9 @@ class Handler(SimpleHTTPRequestHandler):
     def do_PATCH(self):
         parsed = urlparse(self.path)
         try:
-            if parsed.path.startswith("/api/fingerprints/"):
-                fingerprint = parsed.path.rsplit("/", 1)[-1]
-                body = read_json_body(self)
-                status = body.get("status")
-                if status not in {"active", "fixed", "ignored"}:
-                    raise ValueError("status 仅支持 active、fixed、ignored")
-                db = load_db()
-                record = db.setdefault("fingerprints", {}).setdefault(fingerprint, {})
-                record.update({"status": status, "owner": str(body.get("owner") or record.get("owner") or ""), "notes": str(body.get("notes") or record.get("notes") or ""), "updated_at": now_iso()})
-                record["resolved_at"] = now_iso() if status == "fixed" else None
-                save_db(db)
-                return response(self, 200, {"fingerprint": fingerprint, **record})
-            if parsed.path.startswith("/api/investigations/"):
-                inv_id = parsed.path.rsplit("/", 1)[-1]
-                body = read_json_body(self)
-                db = load_db()
-                inv = find_inv(db, inv_id)
-                if not inv:
-                    return response(self, 404, {"error": "not found"})
-                for key in ["title", "repo", "framework", "command", "notes"]:
-                    if key in body:
-                        inv[key] = body[key]
-                if "cwd" in body:
-                    inv["cwd"] = str(resolve_cwd(body["cwd"]))
-                inv["updated_at"] = now_iso()
-                save_db(db)
-                return response(self, 200, {"investigation": investigation_summary(inv, db["runs"])})
+            route = handle_write_patch(self, parsed.path, route_context())
+            if route is not None:
+                return response(self, route[0], route[1])
         except Exception as exc:
             return response(self, 400, {"error": str(exc)})
         return response(self, 404, {"error": "not found"})
